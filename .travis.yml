@@ -13,6 +13,7 @@ matrix:
         - go test -coverprofile c.out
         - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
     - go: 1.12
+      install: true
       script:
         - go build
         - go test -coverprofile c.out
@@ -20,8 +21,6 @@ matrix:
 
 env:
   - GO111MODULE=on
-
-install: true
 
 before_script:
   - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
