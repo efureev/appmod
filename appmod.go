@@ -75,3 +75,7 @@ func (b *BaseAppModule) BeforeDestroy(fn func(mod AppModule) error) {
 func DefaultConfig() AppModuleConfig {
 	return Config{`App Module`, `v0.0.1`}
 }
+
+func NewConfig(name, version string) AppModuleConfig {
+	return Config{name, version}
+}
