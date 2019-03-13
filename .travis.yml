@@ -3,8 +3,13 @@ go:
   - 1.11
   - 1.12
 
+env:
+  - GO111MODULE=on
+
+install: true
+
 script:
-  - go get -t -v ./...
+#  - go get -t -v ./...
   - go build
   - go test -coverprofile c.out
   - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
