@@ -1,18 +1,27 @@
 language: go
-go:
-  - 1.11
-  - 1.12
+
+matrix:
+  include:
+    - go: "1.10"
+      script:
+        - go get -t -v ./...
+        - go test -coverprofile c.out
+        - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
+    - go: 1.11
+      script:
+        - go get -t -v ./...
+        - go test -coverprofile c.out
+        - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
+    - go: 1.12
+      script:
+        - go build
+        - go test -coverprofile c.out
+        - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
 
 env:
   - GO111MODULE=on
 
 install: true
-
-script:
-#  - go get -t -v ./...
-  - go build
-  - go test -coverprofile c.out
-  - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
 
 before_script:
   - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
