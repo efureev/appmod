@@ -1,11 +1,11 @@
 PKG=./
 
 cover: test
-	go tool cover -html=coverage.out
+	go tool cover -html=./coverage.out
 
 
 test:
-	go test -coverprofile=coverage.out
+	go test -race -coverprofile=./coverage.out
 
 
 check: check-go check-lint

@@ -1,5 +1,5 @@
 module github.com/efureev/appmod
 
-go 1.12
+go 1.13
 
-require github.com/smartystreets/goconvey v0.0.0-20190306220146-200a235640ff
+require github.com/smartystreets/goconvey v0.0.0-20190731233626-505e41936337
