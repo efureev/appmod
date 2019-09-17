@@ -21,18 +21,22 @@ matrix:
         - go test -coverprofile c.out
         - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
     - go: 1.13
-        env:
-          - GO111MODULE=on
-        install: true
-        script:
-          - go build
-          - go test -coverprofile c.out
-          - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
+      env:
+        - GO111MODULE=on
+      install: true
+      script:
+        - go build
+        - go test -coverprofile c.out
+        - go test -v -cover -race -coverprofile=coverage.txt -covermode=atomic
 
 before_script:
   - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
   - chmod +x ./cc-test-reporter
   - ./cc-test-reporter before-build
+
+script:
+  - go test -coverprofile c.out ./...
+  - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
 
 after_script:
   - ./cc-test-reporter after-build --exit-code $TRAVIS_TEST_RESULT
