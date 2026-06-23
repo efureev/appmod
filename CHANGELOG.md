@@ -41,3 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Documented the immutability contract of `Config` relative to `SetConfig` (#3).
 - Renamed the misleading `Events/PanicMode` test to `Events/HookError` and added
   `Events/HookPanic`, `New/Options` and a concurrent `Init`/`Destroy` test (#5).
+- Split the single `appmod.go` into focused files (`module.go`, `config.go`,
+  `state.go`, `errors.go`, `base.go`, `options.go`); `appmod.go` now only holds
+  the package documentation and the compile-time contract checks. No public API
+  changes (#5).

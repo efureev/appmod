@@ -195,6 +195,20 @@ if err := mod.Init(ctx); err != nil {
 
 То же самое относится к `BeforeDestroy` и `Destroy(ctx)`.
 
+## Структура пакета
+
+Пакет разбит на небольшие файлы с чёткой зоной ответственности:
+
+| Файл         | Назначение                                                            |
+|--------------|-----------------------------------------------------------------------|
+| `appmod.go`  | Документация пакета и compile-time проверки контрактов.               |
+| `module.go`  | `AppModule` и узкие интерфейсы `Configurable` / `Lifecycle` / `HookRegistry`, `HookFunc`. |
+| `config.go`  | `AppModuleConfig`, тип-значение `Config` и `NewConfig` / `DefaultConfig`. |
+| `state.go`   | Перечисление состояний `State` и его метод `String`.                  |
+| `errors.go`  | Sentinel-ошибки жизненного цикла.                                     |
+| `base.go`    | Встраиваемая реализация `BaseAppModule`.                              |
+| `options.go` | Функциональные опции и конструктор `New`.                             |
+
 ## Разработка
 
 В репозитории есть `Makefile` и `docker-compose.yml`, поэтому локальный тулчейн Go

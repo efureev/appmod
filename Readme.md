@@ -195,6 +195,20 @@ if err := mod.Init(ctx); err != nil {
 
 The same applies to `BeforeDestroy` and `Destroy(ctx)`.
 
+## Package layout
+
+The package is split into small, focused files:
+
+| File         | Responsibility                                                        |
+|--------------|-----------------------------------------------------------------------|
+| `appmod.go`  | Package documentation and compile-time contract checks.               |
+| `module.go`  | `AppModule` and the narrow `Configurable` / `Lifecycle` / `HookRegistry` interfaces, `HookFunc`. |
+| `config.go`  | `AppModuleConfig`, the `Config` value type and `NewConfig` / `DefaultConfig`. |
+| `state.go`   | The lifecycle `State` enum and its `String` method.                   |
+| `errors.go`  | Sentinel lifecycle errors.                                            |
+| `base.go`    | The embeddable `BaseAppModule` implementation.                        |
+| `options.go` | Functional options and the `New` constructor.                         |
+
 ## Development
 
 The repository ships a `Makefile` and `docker-compose.yml` so you don't need a local
