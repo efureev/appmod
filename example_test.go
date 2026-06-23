@@ -12,15 +12,15 @@ func ExampleBaseAppModule() {
 	mod := &BaseAppModule{}
 	mod.SetConfig(NewConfig("My Module", "v1.0.0"))
 
-	mod.BeforeStart(func(_ context.Context, m AppModule) error {
+	mod.BeforeStart(func(_ context.Context, m HookModule) error {
 		fmt.Printf("starting %s %s\n", m.Config().Name(), m.Config().Version())
 		return nil
 	})
-	mod.AfterStart(func(_ context.Context, _ AppModule) error {
+	mod.AfterStart(func(_ context.Context, _ HookModule) error {
 		fmt.Println("started")
 		return nil
 	})
-	mod.BeforeDestroy(func(_ context.Context, m AppModule) error {
+	mod.BeforeDestroy(func(_ context.Context, m HookModule) error {
 		fmt.Printf("stopping %s\n", m.Config().Name())
 		return nil
 	})
@@ -46,7 +46,7 @@ func ExampleBaseAppModule() {
 func ExampleBaseAppModule_abort() {
 	mod := &BaseAppModule{}
 
-	mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+	mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 		return errors.New("config is invalid")
 	})
 
@@ -56,7 +56,7 @@ func ExampleBaseAppModule_abort() {
 	}
 
 	// Output:
-	// init failed: appmod: BeforeStart hook failed: config is invalid
+	// init failed: appmod: BeforeStart hook #0 failed: config is invalid
 	// initialized: false
 }
 
@@ -67,11 +67,11 @@ func ExampleManager() {
 	newModule := func(name string) *BaseAppModule {
 		m := &BaseAppModule{}
 		m.SetConfig(NewConfig(name, "v1"))
-		m.BeforeStart(func(_ context.Context, mod AppModule) error {
+		m.BeforeStart(func(_ context.Context, mod HookModule) error {
 			fmt.Println("start", mod.Config().Name())
 			return nil
 		})
-		m.BeforeDestroy(func(_ context.Context, mod AppModule) error {
+		m.BeforeDestroy(func(_ context.Context, mod HookModule) error {
 			fmt.Println("stop", mod.Config().Name())
 			return nil
 		})

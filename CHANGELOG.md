@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Named, prioritized and removable hooks** (#3): the new `Hook` struct
+  (`Name`, `Priority`, `Run`) and `Phase` enum, plus `AddHook(phase, hook)` /
+  `RemoveHook(phase, name)` on `BaseAppModule` (and in the `HookRegistry`
+  interface) and the `WithHook` option. Hooks within a phase now run in
+  ascending priority order (stable for equal priorities) (#3).
+- **Per-module structured logging** (#4): an optional `*slog.Logger` on
+  `BaseAppModule` (via `SetLogger` or the `WithModuleLogger` option) that reports
+  lifecycle transitions and phase durations; it defaults to a no-op logger.
+- **Typed hook error** `HookError{Phase, Index, Name, Module, Err}` (#4) returned
+  by `Init` / `Destroy` (and rollback) so a failing hook can be identified
+  programmatically via `errors.As`; it unwraps to the original cause.
+- Narrow `Named` and `Stateful` interfaces and the read-only `HookModule` view
+  now passed to hooks instead of the full `AppModule` (#3).
+
 - **Module orchestrator** `Manager` (variant C): register named modules with
   their dependencies and start them in dependency (topological) order, starting
   independent modules concurrently, and stop them in reverse order. Includes
@@ -41,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** `HookFunc` now receives the narrow read-only `HookModule` view
+  (`Configurable` + `Named` + `Stateful`) instead of the full `AppModule`, so a
+  hook can no longer re-enter `Init` / `Destroy` or mutate the hook set (#3).
+- **Breaking:** failing hooks are now reported as `*HookError` (with the phase,
+  index, hook name and module name) instead of a plain `fmt.Errorf` string (#4).
+- Internal hook storage is now `[]Hook` (named + prioritized); `AddHook` /
+  `RemoveHook` were added to the `HookRegistry` interface (#3).
+- `BaseAppModule` now also implements `Named` (`Name()`) and exposes
+  `SetLogger`; `AppModule` is composed of `Named` and `Stateful` too (#3, #4).
 - Concurrent / repeated `Init` and `Destroy` are now handled through an internal
   lifecycle state instead of a plain boolean flag (#1).
 - `Init` failure semantics are now **atomic**: any start-hook failure (including
@@ -52,6 +75,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Renamed the misleading `Events/PanicMode` test to `Events/HookError` and added
   `Events/HookPanic`, `New/Options` and a concurrent `Init`/`Destroy` test (#5).
 - Split the single `appmod.go` into focused files (`module.go`, `config.go`,
-  `state.go`, `errors.go`, `base.go`, `options.go`); `appmod.go` now only holds
-  the package documentation and the compile-time contract checks. No public API
-  changes (#5).
+  `state.go`, `errors.go`, `base.go`, `options.go`, `hook.go`); `appmod.go` now
+  only holds the package documentation and the compile-time contract checks (#5).

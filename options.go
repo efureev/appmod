@@ -1,5 +1,7 @@
 package appmod
 
+import "log/slog"
+
 // Option configures a [BaseAppModule] created with [New].
 type Option func(*BaseAppModule)
 
@@ -8,24 +10,39 @@ func WithConfig(config AppModuleConfig) Option {
 	return func(b *BaseAppModule) { b.config = config }
 }
 
-// WithBeforeStart registers a BeforeStart hook.
+// WithModuleLogger sets the structured logger used to report the module's
+// lifecycle events.
+func WithModuleLogger(logger *slog.Logger) Option {
+	return func(b *BaseAppModule) { b.logger = logger }
+}
+
+// WithBeforeStart registers an anonymous BeforeStart hook.
 func WithBeforeStart(fn HookFunc) Option {
-	return func(b *BaseAppModule) { b.beforeStartFns = append(b.beforeStartFns, fn) }
+	return func(b *BaseAppModule) { b.beforeStartHooks = append(b.beforeStartHooks, Hook{Run: fn}) }
 }
 
-// WithAfterStart registers an AfterStart hook.
+// WithAfterStart registers an anonymous AfterStart hook.
 func WithAfterStart(fn HookFunc) Option {
-	return func(b *BaseAppModule) { b.afterStartFns = append(b.afterStartFns, fn) }
+	return func(b *BaseAppModule) { b.afterStartHooks = append(b.afterStartHooks, Hook{Run: fn}) }
 }
 
-// WithBeforeDestroy registers a BeforeDestroy hook.
+// WithBeforeDestroy registers an anonymous BeforeDestroy hook.
 func WithBeforeDestroy(fn HookFunc) Option {
-	return func(b *BaseAppModule) { b.beforeDestroyFns = append(b.beforeDestroyFns, fn) }
+	return func(b *BaseAppModule) { b.beforeDestroyHooks = append(b.beforeDestroyHooks, Hook{Run: fn}) }
 }
 
-// WithAfterDestroy registers an AfterDestroy hook.
+// WithAfterDestroy registers an anonymous AfterDestroy hook.
 func WithAfterDestroy(fn HookFunc) Option {
-	return func(b *BaseAppModule) { b.afterDestroyFns = append(b.afterDestroyFns, fn) }
+	return func(b *BaseAppModule) { b.afterDestroyHooks = append(b.afterDestroyHooks, Hook{Run: fn}) }
+}
+
+// WithHook registers a named, prioritized hook for the given phase.
+func WithHook(phase Phase, hook Hook) Option {
+	return func(b *BaseAppModule) {
+		if slice := b.hooksFor(phase); slice != nil {
+			*slice = append(*slice, hook)
+		}
+	}
 }
 
 // New creates a [BaseAppModule] configured with the given options.

@@ -8,7 +8,11 @@
 //
 // Around the lifecycle a module exposes four sets of hooks that are executed in
 // order: BeforeStart, AfterStart (on Init) and BeforeDestroy, AfterDestroy
-// (on Destroy). Any hook may abort the lifecycle by returning an error.
+// (on Destroy). Hooks can be anonymous or named and prioritized (see [Hook] and
+// [BaseAppModule.AddHook] / [BaseAppModule.RemoveHook]); within a phase they run
+// in ascending priority order. Any hook may abort the lifecycle by returning an
+// error, which is reported as a [HookError]. A hook receives the narrow,
+// read-only [HookModule] view rather than the full [AppModule].
 //
 // The lifecycle is modeled as an explicit state machine (see [State]):
 //
@@ -31,10 +35,12 @@
 //
 // The package is organized into focused files:
 //
-//	module.go  — the AppModule contract and the narrow Configurable / Lifecycle /
-//	             HookRegistry interfaces plus the HookFunc type.
+//	module.go  — the AppModule contract and the narrow Configurable / Named /
+//	             Stateful / Lifecycle / HookRegistry interfaces, HookFunc and the
+//	             read-only HookModule view.
 //	config.go  — the AppModuleConfig interface, the Config value type and its
 //	             constructors (NewConfig, DefaultConfig).
+//	hook.go    — the Phase and Hook types and the typed HookError.
 //	state.go   — the lifecycle State enum and its String method.
 //	errors.go  — the sentinel lifecycle errors.
 //	base.go    — the embeddable BaseAppModule implementation.

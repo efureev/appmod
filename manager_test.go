@@ -23,11 +23,11 @@ type recordingModule struct {
 func newRecordingModule(name string, log *eventLog) *recordingModule {
 	m := &recordingModule{name: name, log: log}
 	m.SetConfig(NewConfig(name, "v1"))
-	m.BeforeStart(func(_ context.Context, _ AppModule) error {
+	m.BeforeStart(func(_ context.Context, _ HookModule) error {
 		log.add("start:" + name)
 		return m.startErr
 	})
-	m.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+	m.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 		log.add("stop:" + name)
 		return m.stopErr
 	})
@@ -176,7 +176,7 @@ func TestManagerParallelStart(t *testing.T) {
 	// this only completes if they run concurrently.
 	var wg sync.WaitGroup
 	wg.Add(2)
-	barrier := func(_ context.Context, _ AppModule) error {
+	barrier := func(_ context.Context, _ HookModule) error {
 		wg.Done()
 		wg.Wait()
 		return nil

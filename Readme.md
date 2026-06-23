@@ -18,7 +18,10 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - Clear separation between the **contract** (interfaces) and the **base implementation**.
 - Context-aware lifecycle: `Init(ctx)` / `Destroy(ctx)`.
 - Four sets of lifecycle hooks; multiple hooks can be registered per phase and run in order.
-- Hooks can abort startup/shutdown by returning an `error`.
+- **Named, prioritized and removable hooks** (`Hook`, `AddHook` / `RemoveHook`): within a phase, hooks run in ascending priority order.
+- Hooks receive a narrow, read-only `HookModule` view (config/name/state) instead of the full module.
+- Hooks can abort startup/shutdown by returning an `error`, reported as a typed `HookError` (phase, index, name, module).
+- Optional **per-module structured logging** (`slog`) of lifecycle transitions and phase durations.
 - Idempotency guard: double `Init` or `Destroy` before `Init` returns a sentinel error.
 - Explicit lifecycle **state machine** (`Created → Initializing → Running → Destroying → Destroyed`, plus `Failed`) exposed via `State()`.
 - **Context-aware** lifecycle: hooks are skipped once the context is canceled.
@@ -26,7 +29,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - Embeddable `BaseAppModule` — implement your own module by embedding it.
 - **Concurrency-safe**: lifecycle, hook registration and config access are mutex-guarded.
 - **Panic-safe hooks**: a panic in a hook is recovered and returned as an error.
-- Narrow capability interfaces (`Configurable` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
+- Narrow capability interfaces (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
 - `New(opts ...Option)` constructor with functional options.
 - **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, reverse-order stop, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
 
@@ -49,13 +52,28 @@ type AppModuleConfig interface {
     Version() string
 }
 
-// HookFunc is a lifecycle hook.
-type HookFunc func(ctx context.Context, mod AppModule) error
+// HookFunc is a lifecycle hook; it receives a narrow, read-only view.
+type HookFunc func(ctx context.Context, mod HookModule) error
 
 // Narrow capability interfaces.
 type Configurable interface {
     SetConfig(config AppModuleConfig)
     Config() AppModuleConfig
+}
+
+type Named interface {
+    Name() string
+}
+
+type Stateful interface {
+    State() State
+}
+
+// HookModule is the narrow, read-only view passed to a HookFunc.
+type HookModule interface {
+    Configurable
+    Named
+    Stateful
 }
 
 type Lifecycle interface {
@@ -68,11 +86,15 @@ type HookRegistry interface {
     AfterStart(fn HookFunc)
     BeforeDestroy(fn HookFunc)
     AfterDestroy(fn HookFunc)
+    AddHook(phase Phase, hook Hook)
+    RemoveHook(phase Phase, name string) bool
 }
 
 // AppModule is composed of the narrow interfaces above.
 type AppModule interface {
     Configurable
+    Named
+    Stateful
     Lifecycle
     HookRegistry
 }
@@ -107,8 +129,33 @@ half-started: `Init` either fully succeeds (`StateRunning`) or fails
 | `DefaultConfig()`              | Returns a default `Config` (`App Module`, `v0.0.1`). |
 | `New(opts ...Option)`          | Creates a `*BaseAppModule` configured with functional options. |
 
-Functional options: `WithConfig`, `WithBeforeStart`, `WithAfterStart`,
-`WithBeforeDestroy`, `WithAfterDestroy`.
+Functional options: `WithConfig`, `WithModuleLogger`, `WithHook`,
+`WithBeforeStart`, `WithAfterStart`, `WithBeforeDestroy`, `WithAfterDestroy`.
+
+### Named, prioritized hooks
+
+Beyond the anonymous `BeforeStart` / `AfterStart` / ... helpers, hooks can be
+registered with a name and a priority and removed later. Within a phase, hooks
+run in ascending priority order (ties keep registration order):
+
+```go
+mod.AddHook(appmod.PhaseBeforeStart, appmod.Hook{
+    Name:     "open-db",
+    Priority: -10, // runs early
+    Run: func(ctx context.Context, m appmod.HookModule) error { return nil },
+})
+mod.RemoveHook(appmod.PhaseBeforeStart, "open-db")
+```
+
+A failing hook is returned as a `*HookError` carrying the phase, index, hook
+name and module name; it unwraps to the original error so `errors.Is` /
+`errors.As` keep working.
+
+### Per-module logging
+
+Attach an `*slog.Logger` to a module (via `WithModuleLogger` or `SetLogger`) to
+get structured logs of lifecycle transitions and phase durations. Logging
+defaults to a no-op handler.
 
 ```go
 mod := appmod.New(
@@ -228,11 +275,12 @@ The package is split into small, focused files:
 | File         | Responsibility                                                        |
 |--------------|-----------------------------------------------------------------------|
 | `appmod.go`  | Package documentation and compile-time contract checks.               |
-| `module.go`  | `AppModule` and the narrow `Configurable` / `Lifecycle` / `HookRegistry` interfaces, `HookFunc`. |
+| `module.go`  | `AppModule` and the narrow `Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry` interfaces, `HookFunc`, `HookModule`. |
 | `config.go`  | `AppModuleConfig`, the `Config` value type and `NewConfig` / `DefaultConfig`. |
 | `state.go`   | The lifecycle `State` enum and its `String` method.                   |
 | `errors.go`  | Sentinel lifecycle errors.                                            |
 | `base.go`    | The embeddable `BaseAppModule` implementation.                        |
+| `hook.go`    | The `Phase` and `Hook` types and the typed `HookError`.               |
 | `options.go` | Functional options and the `New` constructor.                         |
 | `manager.go` | The `Manager` orchestrator: dependency-ordered start/stop, graceful shutdown, health checks. |
 

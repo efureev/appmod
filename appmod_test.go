@@ -112,23 +112,23 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		var order []string
 
 		newConfig := Config{name: `New Application`, version: `v3`}
-		mod.BeforeStart(func(_ context.Context, m AppModule) error {
+		mod.BeforeStart(func(_ context.Context, m HookModule) error {
 			order = append(order, "beforeStart")
 			m.SetConfig(newConfig)
 			return nil
 		})
-		mod.AfterStart(func(_ context.Context, _ AppModule) error {
+		mod.AfterStart(func(_ context.Context, _ HookModule) error {
 			order = append(order, "afterStart")
 			return nil
 		})
 
 		finishConfig := Config{name: `New Application 2`, version: `v4`}
-		mod.BeforeDestroy(func(_ context.Context, m AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, m HookModule) error {
 			order = append(order, "beforeDestroy")
 			m.SetConfig(finishConfig)
 			return nil
 		})
-		mod.AfterDestroy(func(_ context.Context, _ AppModule) error {
+		mod.AfterDestroy(func(_ context.Context, _ HookModule) error {
 			order = append(order, "afterDestroy")
 			return nil
 		})
@@ -171,7 +171,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 
 		var calls int
 		for range 3 {
-			mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 				calls++
 				return nil
 			})
@@ -191,10 +191,10 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		error1 := errors.New(`error BeforeStart`)
 		error2 := errors.New(`error BeforeDestroy`)
 
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			return error1
 		})
-		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 			return error2
 		})
 
@@ -215,7 +215,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 
 	t.Run("Events/HookPanic", func(t *testing.T) {
 		mod := &BaseAppModule{}
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			panic("boom")
 		})
 
@@ -232,7 +232,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		var started bool
 		mod := New(
 			WithConfig(NewConfig("opt", "v1")),
-			WithBeforeStart(func(_ context.Context, _ AppModule) error {
+			WithBeforeStart(func(_ context.Context, _ HookModule) error {
 				started = true
 				return nil
 			}),
@@ -257,7 +257,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				mod.BeforeStart(func(_ context.Context, _ AppModule) error { return nil })
+				mod.BeforeStart(func(_ context.Context, _ HookModule) error { return nil })
 				_ = mod.Init(t.Context())
 				_ = mod.Initialized()
 				mod.SetConfig(NewConfig("c", "v"))
@@ -318,19 +318,19 @@ func TestAppModuleInitRollback(t *testing.T) {
 		mod := &BaseAppModule{}
 
 		var order []string
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			order = append(order, "beforeStart")
 			return errors.New("boom")
 		})
-		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 			order = append(order, "beforeDestroy1")
 			return nil
 		})
-		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 			order = append(order, "beforeDestroy2")
 			return nil
 		})
-		mod.AfterDestroy(func(_ context.Context, _ AppModule) error {
+		mod.AfterDestroy(func(_ context.Context, _ HookModule) error {
 			order = append(order, "afterDestroy")
 			return nil
 		})
@@ -359,10 +359,10 @@ func TestAppModuleInitRollback(t *testing.T) {
 		mod := &BaseAppModule{}
 
 		var torndown bool
-		mod.AfterStart(func(_ context.Context, _ AppModule) error {
+		mod.AfterStart(func(_ context.Context, _ HookModule) error {
 			return errors.New("after start boom")
 		})
-		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 			torndown = true
 			return nil
 		})
@@ -386,10 +386,10 @@ func TestAppModuleInitRollback(t *testing.T) {
 
 		startErr := errors.New("start boom")
 		rollbackErr := errors.New("teardown boom")
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			return startErr
 		})
-		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
 			return rollbackErr
 		})
 
@@ -408,7 +408,7 @@ func TestAppModuleContext(t *testing.T) {
 		mod := &BaseAppModule{}
 
 		var called bool
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			called = true
 			return nil
 		})
@@ -433,11 +433,11 @@ func TestAppModuleContext(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 		var second bool
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			cancel()
 			return nil
 		})
-		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			second = true
 			return nil
 		})

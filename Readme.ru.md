@@ -19,7 +19,10 @@
 - Чёткое разделение **контракта** (интерфейсы) и **базовой реализации**.
 - Жизненный цикл с поддержкой контекста: `Init(ctx)` / `Destroy(ctx)`.
 - Четыре набора хуков; на каждую фазу можно зарегистрировать несколько хуков, выполняемых по порядку.
-- Хуки способны прервать запуск/остановку через возврат `error`.
+- **Именованные, приоритетные и удаляемые хуки** (`Hook`, `AddHook` / `RemoveHook`): в рамках фазы хуки выполняются в порядке возрастания приоритета.
+- Хуки получают узкое read-only представление `HookModule` (конфиг/имя/состояние) вместо полного модуля.
+- Хуки способны прервать запуск/остановку через возврат `error`, который возвращается как типизированный `HookError` (фаза, индекс, имя, модуль).
+- Опциональное **структурированное логирование на уровне модуля** (`slog`): переходы жизненного цикла и длительность фаз.
 - Защита идемпотентности: повторный `Init` или `Destroy` до `Init` возвращает sentinel-ошибку.
 - Явная **машина состояний** жизненного цикла (`Created → Initializing → Running → Destroying → Destroyed`, плюс `Failed`), доступная через `State()`.
 - **Учёт контекста**: после отмены контекста оставшиеся хуки не выполняются.
@@ -27,7 +30,7 @@
 - Встраиваемый `BaseAppModule` — реализуйте свой модуль через встраивание.
 - **Потокобезопасность**: жизненный цикл, регистрация хуков и доступ к конфигу защищены мьютексом.
 - **Защита от паник в хуках**: паника в хуке перехватывается и возвращается как ошибка.
-- Узкие интерфейсы возможностей (`Configurable` / `Lifecycle` / `HookRegistry`), составляющие `AppModule`.
+- Узкие интерфейсы возможностей (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`), составляющие `AppModule`.
 - Конструктор `New(opts ...Option)` с функциональными опциями.
 - **Оркестратор модулей** `Manager`: запуск в порядке зависимостей (топологический) с параллельным стартом независимых модулей, остановка в обратном порядке, обнаружение циклов зависимостей, graceful shutdown по `SIGINT`/`SIGTERM` и опциональные health-проверки.
 
@@ -50,13 +53,28 @@ Name() string
 Version() string
 }
 
-// HookFunc — хук жизненного цикла.
-type HookFunc func(ctx context.Context, mod AppModule) error
+// HookFunc — хук жизненного цикла; получает узкое read-only представление.
+type HookFunc func(ctx context.Context, mod HookModule) error
 
 // Узкие интерфейсы возможностей.
 type Configurable interface {
 SetConfig(config AppModuleConfig)
 Config() AppModuleConfig
+}
+
+type Named interface {
+Name() string
+}
+
+type Stateful interface {
+State() State
+}
+
+// HookModule — узкое read-only представление, передаваемое в HookFunc.
+type HookModule interface {
+Configurable
+Named
+Stateful
 }
 
 type Lifecycle interface {
@@ -69,11 +87,15 @@ BeforeStart(fn HookFunc)
 AfterStart(fn HookFunc)
 BeforeDestroy(fn HookFunc)
 AfterDestroy(fn HookFunc)
+AddHook(phase Phase, hook Hook)
+RemoveHook(phase Phase, name string) bool
 }
 
 // AppModule составлен из узких интерфейсов выше.
 type AppModule interface {
 Configurable
+Named
+Stateful
 Lifecycle
 HookRegistry
 }
@@ -108,8 +130,34 @@ Created → Initializing → Running → Destroying → Destroyed
 | `DefaultConfig()`          | Возвращает `Config` по умолчанию (`App Module`, `v0.0.1`). |
 | `New(opts ...Option)`      | Создаёт `*BaseAppModule`, настроенный функциональными опциями. |
 
-Функциональные опции: `WithConfig`, `WithBeforeStart`, `WithAfterStart`,
-`WithBeforeDestroy`, `WithAfterDestroy`.
+Функциональные опции: `WithConfig`, `WithModuleLogger`, `WithHook`,
+`WithBeforeStart`, `WithAfterStart`, `WithBeforeDestroy`, `WithAfterDestroy`.
+
+### Именованные приоритетные хуки
+
+Помимо анонимных помощников `BeforeStart` / `AfterStart` / ... хуки можно
+регистрировать с именем и приоритетом и удалять позже. В рамках фазы хуки
+выполняются в порядке возрастания приоритета (при равенстве сохраняется порядок
+регистрации):
+
+```go
+mod.AddHook(appmod.PhaseBeforeStart, appmod.Hook{
+    Name:     "open-db",
+    Priority: -10, // выполнится раньше
+    Run: func(ctx context.Context, m appmod.HookModule) error { return nil },
+})
+mod.RemoveHook(appmod.PhaseBeforeStart, "open-db")
+```
+
+Ошибка хука возвращается как `*HookError` с фазой, индексом, именем хука и именем
+модуля; она разворачивается до исходной ошибки, поэтому `errors.Is` / `errors.As`
+продолжают работать.
+
+### Логирование на уровне модуля
+
+Привяжите `*slog.Logger` к модулю (через `WithModuleLogger` или `SetLogger`),
+чтобы получать структурированные логи переходов жизненного цикла и длительности
+фаз. По умолчанию используется no-op обработчик.
 
 ```go
 mod := appmod.New(
@@ -229,11 +277,12 @@ if err := mgr.Run(context.Background()); err != nil {
 | Файл         | Назначение                                                            |
 |--------------|-----------------------------------------------------------------------|
 | `appmod.go`  | Документация пакета и compile-time проверки контрактов.               |
-| `module.go`  | `AppModule` и узкие интерфейсы `Configurable` / `Lifecycle` / `HookRegistry`, `HookFunc`. |
+| `module.go`  | `AppModule` и узкие интерфейсы `Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`, `HookFunc`, `HookModule`. |
 | `config.go`  | `AppModuleConfig`, тип-значение `Config` и `NewConfig` / `DefaultConfig`. |
 | `state.go`   | Перечисление состояний `State` и его метод `String`.                  |
 | `errors.go`  | Sentinel-ошибки жизненного цикла.                                     |
 | `base.go`    | Встраиваемая реализация `BaseAppModule`.                              |
+| `hook.go`    | Типы `Phase` и `Hook`, типизированная ошибка `HookError`.             |
 | `options.go` | Функциональные опции и конструктор `New`.                             |
 | `manager.go` | Оркестратор `Manager`: запуск/остановка по зависимостям, graceful shutdown, health-проверки. |
 
