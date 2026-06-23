@@ -29,6 +29,7 @@
 - **Защита от паник в хуках**: паника в хуке перехватывается и возвращается как ошибка.
 - Узкие интерфейсы возможностей (`Configurable` / `Lifecycle` / `HookRegistry`), составляющие `AppModule`.
 - Конструктор `New(opts ...Option)` с функциональными опциями.
+- **Оркестратор модулей** `Manager`: запуск в порядке зависимостей (топологический) с параллельным стартом независимых модулей, остановка в обратном порядке, обнаружение циклов зависимостей, graceful shutdown по `SIGINT`/`SIGTERM` и опциональные health-проверки.
 
 ## Требования
 
@@ -195,6 +196,32 @@ if err := mod.Init(ctx); err != nil {
 
 То же самое относится к `BeforeDestroy` и `Destroy(ctx)`.
 
+### Оркестрация модулей
+
+Для приложения из нескольких взаимозависимых модулей `Manager` запускает их в
+порядке зависимостей (топологическом) — независимые модули параллельно — и
+останавливает в обратном порядке:
+
+```go
+mgr := appmod.NewManager(
+    appmod.WithShutdownTimeout(10*time.Second),
+)
+_ = mgr.Register("db", db)
+_ = mgr.Register("cache", cache, "db")        // cache зависит от db
+_ = mgr.Register("api", api, "cache", "db")   // api зависит от обоих
+
+// Старт, ожидание SIGINT/SIGTERM и graceful-остановка в обратном порядке.
+if err := mgr.Run(context.Background()); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Register(name, module, deps...)` валидирует имена и зависимости; `Start`
+возвращает `ErrUnknownDependency` для отсутствующих зависимостей и
+`ErrDependencyCycle` при цикле в графе. Неудачный `Start` откатывает уже
+запущенные модули. Модули, реализующие `HealthChecker`, можно проверить через
+`mgr.Health(ctx)`.
+
 ## Структура пакета
 
 Пакет разбит на небольшие файлы с чёткой зоной ответственности:
@@ -208,6 +235,7 @@ if err := mod.Init(ctx); err != nil {
 | `errors.go`  | Sentinel-ошибки жизненного цикла.                                     |
 | `base.go`    | Встраиваемая реализация `BaseAppModule`.                              |
 | `options.go` | Функциональные опции и конструктор `New`.                             |
+| `manager.go` | Оркестратор `Manager`: запуск/остановка по зависимостям, graceful shutdown, health-проверки. |
 
 ## Разработка
 

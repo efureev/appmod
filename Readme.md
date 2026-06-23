@@ -28,6 +28,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - **Panic-safe hooks**: a panic in a hook is recovered and returned as an error.
 - Narrow capability interfaces (`Configurable` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
 - `New(opts ...Option)` constructor with functional options.
+- **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, reverse-order stop, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
 
 ## Requirements
 
@@ -195,6 +196,31 @@ if err := mod.Init(ctx); err != nil {
 
 The same applies to `BeforeDestroy` and `Destroy(ctx)`.
 
+### Orchestrating modules
+
+For an application composed of several inter-dependent modules, `Manager` starts
+them in dependency (topological) order — independent modules concurrently — and
+stops them in the reverse order:
+
+```go
+mgr := appmod.NewManager(
+    appmod.WithShutdownTimeout(10*time.Second),
+)
+_ = mgr.Register("db", db)
+_ = mgr.Register("cache", cache, "db")        // cache depends on db
+_ = mgr.Register("api", api, "cache", "db")   // api depends on both
+
+// Start, wait for SIGINT/SIGTERM, then gracefully stop in reverse order.
+if err := mgr.Run(context.Background()); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Register(name, module, deps...)` validates names and dependencies; `Start`
+returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
+if the graph has a cycle. A failed `Start` rolls back the modules that already
+started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
+
 ## Package layout
 
 The package is split into small, focused files:
@@ -208,6 +234,7 @@ The package is split into small, focused files:
 | `errors.go`  | Sentinel lifecycle errors.                                            |
 | `base.go`    | The embeddable `BaseAppModule` implementation.                        |
 | `options.go` | Functional options and the `New` constructor.                         |
+| `manager.go` | The `Manager` orchestrator: dependency-ordered start/stop, graceful shutdown, health checks. |
 
 ## Development
 

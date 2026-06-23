@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Module orchestrator** `Manager` (variant C): register named modules with
+  their dependencies and start them in dependency (topological) order, starting
+  independent modules concurrently, and stop them in reverse order. Includes
+  dependency-cycle and unknown-dependency detection, error aggregation via
+  `errors.Join`, `slog`-based logging, `SIGINT`/`SIGTERM`-aware graceful
+  shutdown (`Run`), an optional `HealthChecker` interface with `Health`, and the
+  `NewManager` constructor with `WithLogger` / `WithShutdownTimeout` options.
+- Orchestration sentinel errors `ErrEmptyName`, `ErrNilModule`,
+  `ErrDuplicateModule`, `ErrUnknownDependency`, `ErrDependencyCycle`.
+
 - `BaseAppModule` is now **safe for concurrent use**: lifecycle transitions, hook
   registration and configuration access are guarded by an internal mutex (#1).
 - Hooks are now **panic-safe**: a panic raised inside a hook is recovered and

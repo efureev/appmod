@@ -39,6 +39,13 @@
 //	errors.go  — the sentinel lifecycle errors.
 //	base.go    — the embeddable BaseAppModule implementation.
 //	options.go — the functional options and the New constructor.
+//	manager.go — the Manager orchestrator: dependency-ordered start/stop of
+//	             multiple modules, graceful shutdown and health checks.
+//
+// For applications composed of several inter-dependent modules, [Manager]
+// orchestrates them: modules are registered with their dependencies and started
+// in topological order (independent modules concurrently) and stopped in the
+// reverse order.
 package appmod
 
 // Compile-time checks that the contracts are satisfied.

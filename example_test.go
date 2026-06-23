@@ -59,3 +59,45 @@ func ExampleBaseAppModule_abort() {
 	// init failed: appmod: BeforeStart hook failed: config is invalid
 	// initialized: false
 }
+
+// ExampleManager demonstrates orchestrating several modules connected by
+// dependencies: the manager starts them in dependency order and stops them in
+// reverse.
+func ExampleManager() {
+	newModule := func(name string) *BaseAppModule {
+		m := &BaseAppModule{}
+		m.SetConfig(NewConfig(name, "v1"))
+		m.BeforeStart(func(_ context.Context, mod AppModule) error {
+			fmt.Println("start", mod.Config().Name())
+			return nil
+		})
+		m.BeforeDestroy(func(_ context.Context, mod AppModule) error {
+			fmt.Println("stop", mod.Config().Name())
+			return nil
+		})
+		return m
+	}
+
+	mgr := NewManager()
+	_ = mgr.Register("db", newModule("db"))
+	_ = mgr.Register("cache", newModule("cache"), "db")
+	_ = mgr.Register("api", newModule("api"), "cache")
+
+	ctx := context.Background()
+	if err := mgr.Start(ctx); err != nil {
+		fmt.Println("start failed:", err)
+		return
+	}
+	if err := mgr.Stop(ctx); err != nil {
+		fmt.Println("stop failed:", err)
+		return
+	}
+
+	// Output:
+	// start db
+	// start cache
+	// start api
+	// stop api
+	// stop cache
+	// stop db
+}
