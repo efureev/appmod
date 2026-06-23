@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
-	"os/signal"
 	"slices"
 	"sync"
 	"syscall"
 	"time"
+
+	shutdown "github.com/efureev/go-shutdown/v2"
 )
 
 // HealthChecker is an optional capability of a module. Modules registered in a
@@ -181,6 +181,12 @@ func (m *Manager) abort(ctx context.Context, cause error) error {
 
 // Stop tears down all started modules in the reverse of their start order. Every
 // module is attempted even if an earlier one fails; the errors are joined.
+//
+// Stop honors context cancellation between modules: if ctx is canceled (for
+// example, when [Manager.Run] hits its shutdown timeout), Stop aborts before
+// the next module instead of spinning forever, so it does not keep running in a
+// detached goroutine. The names of the modules that were not torn down are
+// retained so a subsequent Stop can resume the teardown.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	started := slices.Clone(m.started)
@@ -190,6 +196,19 @@ func (m *Manager) Stop(ctx context.Context) error {
 	var errs []error
 	for i := len(started) - 1; i >= 0; i-- {
 		name := started[i]
+
+		if err := ctx.Err(); err != nil {
+			// Context canceled (e.g. shutdown timeout): stop iterating so the
+			// teardown does not leak as a detached goroutine. Put the modules
+			// that were not stopped back so a later Stop can finish the job.
+			m.logger.ErrorContext(ctx, "teardown aborted by context", "error", err, "remaining", i+1)
+			m.mu.Lock()
+			m.started = append(slices.Clone(started[:i+1]), m.started...)
+			m.mu.Unlock()
+			errs = append(errs, fmt.Errorf("appmod: teardown aborted: %w", err))
+
+			return errors.Join(errs...)
+		}
 
 		m.mu.Lock()
 		n := m.nodes[name]
@@ -208,28 +227,35 @@ func (m *Manager) Stop(ctx context.Context) error {
 // Run starts all modules and then blocks until the context is canceled or an
 // interrupt/termination signal (SIGINT, SIGTERM) is received, after which it
 // gracefully stops every module. If a shutdown timeout was configured (see
-// [WithShutdownTimeout]), Stop is bounded by it.
+// [WithShutdownTimeout]), Stop is bounded by it and a non-positive value means
+// no timeout.
+//
+// The graceful-shutdown sequence (signal handling and the bounded teardown) is
+// delegated to github.com/efureev/go-shutdown. When the teardown does not
+// finish within the configured timeout, Run returns [shutdown.ErrShutdownTimeout].
 func (m *Manager) Run(ctx context.Context) error {
-	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := m.Start(sigCtx); err != nil {
+	if err := m.Start(ctx); err != nil {
 		return err
 	}
 
-	<-sigCtx.Done()
-	stop()
-	m.logger.Info("shutdown signal received, stopping modules")
+	sd := shutdown.New().
+		SetLogger(slogShutdownLogger{m.logger}).
+		SetTimeout(m.shutdownTimeout).
+		OnDestroy(func(ctx context.Context) error {
+			m.logger.Info("shutdown signal received, stopping modules")
+			return m.Stop(ctx)
+		})
 
-	shutdownCtx := context.WithoutCancel(ctx)
-	if m.shutdownTimeout > 0 {
-		var cancel context.CancelFunc
-		shutdownCtx, cancel = context.WithTimeout(shutdownCtx, m.shutdownTimeout)
-		defer cancel()
-	}
-
-	return m.Stop(shutdownCtx)
+	return sd.WaitContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 }
+
+// slogShutdownLogger adapts a *slog.Logger to the shutdown.Logger interface so
+// the orchestrator can report the shutdown sequence through the same structured
+// logger used for the rest of the lifecycle.
+type slogShutdownLogger struct{ l *slog.Logger }
+
+func (s slogShutdownLogger) Trace(args ...any) { s.l.Debug(fmt.Sprint(args...)) }
+func (s slogShutdownLogger) Info(args ...any)  { s.l.Info(fmt.Sprint(args...)) }
 
 // Health probes every started module that implements [HealthChecker] and joins
 // the errors of the unhealthy ones. It returns nil when all probed modules are

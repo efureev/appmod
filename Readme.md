@@ -268,6 +268,15 @@ returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
 if the graph has a cycle. A failed `Start` rolls back the modules that already
 started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
 
+`Run` delegates its graceful-shutdown sequence (signal handling and the
+timeout-bounded teardown) to
+[`github.com/efureev/go-shutdown`](https://github.com/efureev/go-shutdown): it
+stops on `SIGINT`/`SIGTERM` or context cancellation, then runs `Stop` bounded by
+`WithShutdownTimeout`, returning `shutdown.ErrShutdownTimeout` if the teardown
+does not finish in time. `Stop` honors context cancellation between modules, so
+once the timeout fires it aborts promptly instead of leaking in a detached
+goroutine; modules not yet stopped are retained for a subsequent `Stop`.
+
 ## Examples
 
 Runnable example applications live under [`examples/`](examples) and cover every

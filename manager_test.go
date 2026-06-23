@@ -220,6 +220,41 @@ func TestManagerHealth(t *testing.T) {
 	}
 }
 
+func TestManagerStopContextCanceled(t *testing.T) {
+	log := &eventLog{}
+	mgr := NewManager()
+
+	mustRegister(t, mgr, "db", newRecordingModule("db", log))
+	mustRegister(t, mgr, "cache", newRecordingModule("cache", log), "db")
+	mustRegister(t, mgr, "api", newRecordingModule("api", log), "cache")
+
+	if err := mgr.Start(t.Context()); err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+
+	// A canceled context must abort the teardown before touching any module,
+	// so Stop returns promptly instead of leaking in a detached goroutine.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := mgr.Stop(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Stop() = %v, want to wrap %v", err, context.Canceled)
+	}
+	if events := log.snapshot(); len(events) != 3 {
+		// Only the 3 start events; no module should have been stopped.
+		t.Errorf("events = %v, want no stop events", events)
+	}
+
+	// The not-yet-stopped modules are retained, so a fresh Stop finishes the job.
+	if err := mgr.Stop(t.Context()); err != nil {
+		t.Fatalf("second Stop() = %v, want nil", err)
+	}
+	events := log.snapshot()
+	assertBefore(t, events, "stop:api", "stop:cache")
+	assertBefore(t, events, "stop:cache", "stop:db")
+}
+
 func mustRegister(t *testing.T, mgr *Manager, name string, mod AppModule, deps ...string) {
 	t.Helper()
 	if err := mgr.Register(name, mod, deps...); err != nil {
