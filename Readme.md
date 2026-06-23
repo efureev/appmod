@@ -268,6 +268,23 @@ returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
 if the graph has a cycle. A failed `Start` rolls back the modules that already
 started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
 
+## Examples
+
+Runnable example applications live under [`examples/`](examples) and cover every
+feature of the package:
+
+| Example | Demonstrates |
+| --- | --- |
+| [`basic`](examples/basic)     | Single-module lifecycle: configuration, the four hooks and the `Created → Running → Destroyed` state machine. |
+| [`hooks`](examples/hooks)     | `New(...)` options, `slog` logging, named/prioritized hooks (`AddHook`/`RemoveHook`), the typed `HookError` and automatic rollback. |
+| [`manager`](examples/manager) | `Manager` orchestration of a dependency graph: topological start, concurrent start of independent modules, `HealthChecker`/`Health` and graceful `Run`. |
+
+```bash
+go run ./examples/basic
+go run ./examples/hooks
+go run ./examples/manager
+```
+
 ## Package layout
 
 The package is split into small, focused files:

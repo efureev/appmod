@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Runnable examples** under `examples/` (`basic`, `hooks`, `manager`) covering
+  the single-module lifecycle, the advanced hook features (named/prioritized/
+  removable hooks, `slog` logging, `HookError`, rollback) and the `Manager`
+  orchestrator (dependency graph, concurrent start, `Health`, graceful `Run`).
+
 - **Named, prioritized and removable hooks** (#3): the new `Hook` struct
   (`Name`, `Priority`, `Run`) and `Phase` enum, plus `AddHook(phase, hook)` /
   `RemoveHook(phase, name)` on `BaseAppModule` (and in the `HookRegistry`
