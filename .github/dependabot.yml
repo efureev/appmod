@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    groups: {any: {patterns: ['*']}}
+    schedule: {interval: monthly}
+    assignees: [efureev]
+
+  - package-ecosystem: github-actions
+    directory: /
+    groups: {any: {patterns: ['*']}}
+    schedule: {interval: monthly}
+    assignees: [efureev]

@@ -1,0 +1,62 @@
+name: Test
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  git-leaks:
+    name: GitLeaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+
+      - uses: gacts/gitleaks@v1 # Action page: <https://github.com/gacts/gitleaks>
+
+  lint:
+    name: Golang-CI (lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - uses: golangci/golangci-lint-action@v9 # Action page: <https://github.com/golangci/golangci-lint-action>
+        with: { version: v2.7 }
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: Go build
+        run: go build ./...
+      - name: Go vet
+        run: go vet ./...
+
+  test:
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: Test
+        run: go test -v -race -coverprofile=coverage.out ./...

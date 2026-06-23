@@ -1,94 +1,61 @@
+// Package appmod provides a tiny, dependency-free building block for structuring
+// an application as a set of modules with a common lifecycle.
+//
+// A module is described by the [AppModule] interface and the most common
+// implementation is provided by the embeddable [BaseAppModule]. Each module
+// has a configuration ([AppModuleConfig]) and a lifecycle managed by
+// [BaseAppModule.Init] and [BaseAppModule.Destroy].
+//
+// Around the lifecycle a module exposes four sets of hooks that are executed in
+// order: BeforeStart, AfterStart (on Init) and BeforeDestroy, AfterDestroy
+// (on Destroy). Hooks can be anonymous or named and prioritized (see [Hook] and
+// [BaseAppModule.AddHook] / [BaseAppModule.RemoveHook]); within a phase they run
+// in ascending priority order. Any hook may abort the lifecycle by returning an
+// error, which is reported as a [HookError]. A hook receives the narrow,
+// read-only [HookModule] view rather than the full [AppModule].
+//
+// The lifecycle is modeled as an explicit state machine (see [State]):
+//
+//	Created → Initializing → Running → Destroying → Destroyed
+//
+// Calling Init while the module is already running (or being initialized) and
+// calling Destroy on a module that is not running returns a sentinel error
+// ([ErrAlreadyInitialized] / [ErrNotInitialized]).
+//
+// Init is atomic with respect to failures: if any start hook fails or the
+// context is canceled, the already-executed work is rolled back by running the
+// teardown hooks in reverse order and the module ends up in [StateFailed]. The
+// lifecycle is context-aware — the context is checked between hooks, so a
+// canceled context aborts the remaining start/stop hooks.
+//
+// [BaseAppModule] is safe for concurrent use: lifecycle transitions, hook
+// registration and configuration access are guarded by a mutex. A panic in a
+// hook is recovered and converted into an error instead of crashing the
+// application.
+//
+// The package is organized into focused files:
+//
+//	module.go  — the AppModule contract and the narrow Configurable / Named /
+//	             Stateful / Lifecycle / HookRegistry interfaces, HookFunc and the
+//	             read-only HookModule view.
+//	config.go  — the AppModuleConfig interface, the Config value type and its
+//	             constructors (NewConfig, DefaultConfig).
+//	hook.go    — the Phase and Hook types and the typed HookError.
+//	state.go   — the lifecycle State enum and its String method.
+//	errors.go  — the sentinel lifecycle errors.
+//	base.go    — the embeddable BaseAppModule implementation.
+//	options.go — the functional options and the New constructor.
+//	manager.go — the Manager orchestrator: dependency-ordered start/stop of
+//	             multiple modules, graceful shutdown and health checks.
+//
+// For applications composed of several inter-dependent modules, [Manager]
+// orchestrates them: modules are registered with their dependencies and started
+// in topological order (independent modules concurrently) and stopped in the
+// reverse order.
 package appmod
 
-// AppModuleConfig interface
-type AppModuleConfig interface {
-	Name() string
-	Version() string
-}
-
-// AppModule interface
-type AppModule interface {
-	SetConfig(config AppModuleConfig)
-	Config() AppModuleConfig
-
-	Init() error
-	Destroy() error
-
-	BeforeStart(fn func(mod AppModule) error)
-	//AfterStart(func(arg ...interface{})) error
-	BeforeDestroy(fn func(mod AppModule) error)
-	//AfterDestroy(func(arg ...interface{})) error
-}
-
-// Config structure
-type Config struct {
-	name    string
-	version string
-}
-
-// Name returns app module name
-func (c Config) Name() string {
-	return c.name
-}
-
-// Version returns app module version
-func (c Config) Version() string {
-	return c.version
-}
-
-// BaseAppModule is abstract struct layer
-type BaseAppModule struct {
-	config          AppModuleConfig
-	beforeStartFn   func(mod AppModule) error
-	beforeDestroyFn func(mod AppModule) error
-}
-
-// Config returns app module config
-func (b BaseAppModule) Config() AppModuleConfig {
-	return b.config
-}
-
-// SetConfig set config to app module
-func (b *BaseAppModule) SetConfig(config AppModuleConfig) {
-	b.config = config
-}
-
-// Init initialize app module
-func (b *BaseAppModule) Init() error {
-	if b.beforeStartFn != nil {
-		if err := b.beforeStartFn(b); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Destroy app module
-func (b *BaseAppModule) Destroy() error {
-	if b.beforeDestroyFn != nil {
-		if err := b.beforeDestroyFn(b); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// BeforeStart - event triggered run before init
-func (b *BaseAppModule) BeforeStart(fn func(mod AppModule) error) {
-	b.beforeStartFn = fn
-}
-
-// BeforeDestroy - event triggered run before destroy
-func (b *BaseAppModule) BeforeDestroy(fn func(mod AppModule) error) {
-	b.beforeDestroyFn = fn
-}
-
-// DefaultConfig return default config
-func DefaultConfig() AppModuleConfig {
-	return Config{`App Module`, `v0.0.1`}
-}
-
-// NewConfig create new basic config
-func NewConfig(name, version string) AppModuleConfig {
-	return Config{name, version}
-}
+// Compile-time checks that the contracts are satisfied.
+var (
+	_ AppModule       = (*BaseAppModule)(nil)
+	_ AppModuleConfig = Config{}
+)
