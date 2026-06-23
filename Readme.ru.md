@@ -21,7 +21,14 @@
 - Четыре набора хуков; на каждую фазу можно зарегистрировать несколько хуков, выполняемых по порядку.
 - Хуки способны прервать запуск/остановку через возврат `error`.
 - Защита идемпотентности: повторный `Init` или `Destroy` до `Init` возвращает sentinel-ошибку.
+- Явная **машина состояний** жизненного цикла (`Created → Initializing → Running → Destroying → Destroyed`, плюс `Failed`), доступная через `State()`.
+- **Учёт контекста**: после отмены контекста оставшиеся хуки не выполняются.
+- **Атомарный `Init`**: ошибка любого стартового хука (или отмена контекста) запускает автоматический откат (teardown-хуки выполняются в обратном порядке) и оставляет модуль в `StateFailed`.
 - Встраиваемый `BaseAppModule` — реализуйте свой модуль через встраивание.
+- **Потокобезопасность**: жизненный цикл, регистрация хуков и доступ к конфигу защищены мьютексом.
+- **Защита от паник в хуках**: паника в хуке перехватывается и возвращается как ошибка.
+- Узкие интерфейсы возможностей (`Configurable` / `Lifecycle` / `HookRegistry`), составляющие `AppModule`.
+- Конструктор `New(opts ...Option)` с функциональными опциями.
 
 ## Требования
 
@@ -45,31 +52,72 @@ Version() string
 // HookFunc — хук жизненного цикла.
 type HookFunc func(ctx context.Context, mod AppModule) error
 
-// AppModule описывает жизненный цикл модуля.
-type AppModule interface {
+// Узкие интерфейсы возможностей.
+type Configurable interface {
 SetConfig(config AppModuleConfig)
 Config() AppModuleConfig
+}
 
+type Lifecycle interface {
 Init(ctx context.Context) error
 Destroy(ctx context.Context) error
+}
 
+type HookRegistry interface {
 BeforeStart(fn HookFunc)
 AfterStart(fn HookFunc)
 BeforeDestroy(fn HookFunc)
 AfterDestroy(fn HookFunc)
 }
+
+// AppModule составлен из узких интерфейсов выше.
+type AppModule interface {
+Configurable
+Lifecycle
+HookRegistry
+}
 ```
 
-Жизненный цикл защищён внутренним флагом состояния. Повторный `Init` возвращает
-`ErrAlreadyInitialized`; вызов `Destroy` на неинициализированном модуле возвращает
-`ErrNotInitialized`.
+`BaseAppModule` безопасен для конкурентного использования несколькими горутинами,
+а паника внутри хука перехватывается и возвращается как ошибка.
+
+Жизненный цикл — явная машина состояний, доступная через `State()`:
+
+```
+Created → Initializing → Running → Destroying → Destroyed
+```
+
+Повторный `Init` на работающем модуле возвращает `ErrAlreadyInitialized`; вызов
+`Destroy` на неработающем модуле возвращает `ErrNotInitialized`. Уничтоженный
+(или завершившийся с ошибкой) модуль можно инициализировать повторно.
+
+`Init` **атомарен**: если любой стартовый хук (`BeforeStart` или `AfterStart`)
+возвращает ошибку или контекст отменён, модуль автоматически откатывается,
+выполняя teardown-хуки (`BeforeDestroy`, затем `AfterDestroy`) в обратном порядке
+регистрации, и переходит в `StateFailed`. Ошибки отката объединяются с исходной
+причиной через `errors.Join`. Таким образом, модуль никогда не остаётся
+полу-запущенным: `Init` либо полностью успешен (`StateRunning`), либо
+завершается с ошибкой (`StateFailed`).
 
 ### Конструкторы
 
 | Функция                    | Описание                                                 |
 |----------------------------|----------------------------------------------------------|
-| `NewConfig(name, version)` | Создаёт конфиг с заданными именем и версией.             |
-| `DefaultConfig()`          | Возвращает конфиг по умолчанию (`App Module`, `v0.0.1`). |
+| `NewConfig(name, version)` | Создаёт `Config` с заданными именем и версией.           |
+| `DefaultConfig()`          | Возвращает `Config` по умолчанию (`App Module`, `v0.0.1`). |
+| `New(opts ...Option)`      | Создаёт `*BaseAppModule`, настроенный функциональными опциями. |
+
+Функциональные опции: `WithConfig`, `WithBeforeStart`, `WithAfterStart`,
+`WithBeforeDestroy`, `WithAfterDestroy`.
+
+```go
+mod := appmod.New(
+    appmod.WithConfig(appmod.NewConfig("Cache", "v1.0.0")),
+    appmod.WithBeforeStart(func(ctx context.Context, m appmod.AppModule) error {
+        return nil
+    }),
+)
+```
 
 ## Использование
 

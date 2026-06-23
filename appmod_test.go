@@ -3,6 +3,7 @@ package appmod
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -184,7 +185,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		}
 	})
 
-	t.Run("Events/PanicMode", func(t *testing.T) {
+	t.Run("Events/HookError", func(t *testing.T) {
 		mod := &BaseAppModule{config: Config{name: `test app`, version: `v1`}}
 
 		error1 := errors.New(`error BeforeStart`)
@@ -205,10 +206,247 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 			t.Error("Initialized() = true, want false after failed Init")
 		}
 
-		// Force the module into the initialized state to exercise Destroy hook.
-		mod.initialized = true
+		// Force the module into the running state to exercise Destroy hook.
+		mod.setState(StateRunning)
 		if err := mod.Destroy(t.Context()); !errors.Is(err, error2) {
 			t.Errorf("Destroy() = %v, want %v", err, error2)
+		}
+	})
+
+	t.Run("Events/HookPanic", func(t *testing.T) {
+		mod := &BaseAppModule{}
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			panic("boom")
+		})
+
+		err := mod.Init(t.Context())
+		if err == nil {
+			t.Fatal("Init() = nil, want error after panicking hook")
+		}
+		if mod.Initialized() {
+			t.Error("Initialized() = true, want false after panicking hook")
+		}
+	})
+
+	t.Run("New/Options", func(t *testing.T) {
+		var started bool
+		mod := New(
+			WithConfig(NewConfig("opt", "v1")),
+			WithBeforeStart(func(_ context.Context, _ AppModule) error {
+				started = true
+				return nil
+			}),
+		)
+
+		if got := mod.Config().Name(); got != "opt" {
+			t.Errorf("Config().Name() = %q, want %q", got, "opt")
+		}
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		if !started {
+			t.Error("BeforeStart hook from option was not executed")
+		}
+	})
+
+	t.Run("Concurrent/InitDestroy", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				mod.BeforeStart(func(_ context.Context, _ AppModule) error { return nil })
+				_ = mod.Init(t.Context())
+				_ = mod.Initialized()
+				mod.SetConfig(NewConfig("c", "v"))
+				_ = mod.Destroy(t.Context())
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+func TestAppModuleLifecycleState(t *testing.T) {
+	t.Run("States", func(t *testing.T) {
+		mod := &BaseAppModule{}
+		if got := mod.State(); got != StateCreated {
+			t.Errorf("State() = %v, want %v", got, StateCreated)
+		}
+
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		if got := mod.State(); got != StateRunning {
+			t.Errorf("State() = %v, want %v", got, StateRunning)
+		}
+
+		if err := mod.Destroy(t.Context()); err != nil {
+			t.Fatalf("Destroy() = %v, want nil", err)
+		}
+		if got := mod.State(); got != StateDestroyed {
+			t.Errorf("State() = %v, want %v", got, StateDestroyed)
+		}
+
+		// A destroyed module can be re-initialized.
+		if err := mod.Init(t.Context()); err != nil {
+			t.Errorf("re-Init() = %v, want nil", err)
+		}
+	})
+
+	t.Run("String", func(t *testing.T) {
+		cases := map[State]string{
+			StateCreated:      "Created",
+			StateInitializing: "Initializing",
+			StateRunning:      "Running",
+			StateDestroying:   "Destroying",
+			StateDestroyed:    "Destroyed",
+			StateFailed:       "Failed",
+			State(42):         "State(42)",
+		}
+		for s, want := range cases {
+			if got := s.String(); got != want {
+				t.Errorf("State(%d).String() = %q, want %q", int32(s), got, want)
+			}
+		}
+	})
+}
+
+func TestAppModuleInitRollback(t *testing.T) {
+	t.Run("BeforeStartFailureRunsTeardownReversed", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		var order []string
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			order = append(order, "beforeStart")
+			return errors.New("boom")
+		})
+		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+			order = append(order, "beforeDestroy1")
+			return nil
+		})
+		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+			order = append(order, "beforeDestroy2")
+			return nil
+		})
+		mod.AfterDestroy(func(_ context.Context, _ AppModule) error {
+			order = append(order, "afterDestroy")
+			return nil
+		})
+
+		if err := mod.Init(t.Context()); err == nil {
+			t.Fatal("Init() = nil, want error")
+		}
+		if got := mod.State(); got != StateFailed {
+			t.Errorf("State() = %v, want %v", got, StateFailed)
+		}
+
+		// Teardown runs in reverse registration order: BeforeDestroy hooks
+		// (reversed) then AfterDestroy hooks (reversed).
+		want := []string{"beforeStart", "beforeDestroy2", "beforeDestroy1", "afterDestroy"}
+		if len(order) != len(want) {
+			t.Fatalf("order = %v, want %v", order, want)
+		}
+		for i := range want {
+			if order[i] != want[i] {
+				t.Fatalf("order = %v, want %v", order, want)
+			}
+		}
+	})
+
+	t.Run("AfterStartFailureRollsBack", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		var torndown bool
+		mod.AfterStart(func(_ context.Context, _ AppModule) error {
+			return errors.New("after start boom")
+		})
+		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+			torndown = true
+			return nil
+		})
+
+		if err := mod.Init(t.Context()); err == nil {
+			t.Fatal("Init() = nil, want error")
+		}
+		if mod.Initialized() {
+			t.Error("Initialized() = true, want false after AfterStart failure")
+		}
+		if got := mod.State(); got != StateFailed {
+			t.Errorf("State() = %v, want %v", got, StateFailed)
+		}
+		if !torndown {
+			t.Error("teardown hook was not run during rollback")
+		}
+	})
+
+	t.Run("RollbackErrorIsJoined", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		startErr := errors.New("start boom")
+		rollbackErr := errors.New("teardown boom")
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			return startErr
+		})
+		mod.BeforeDestroy(func(_ context.Context, _ AppModule) error {
+			return rollbackErr
+		})
+
+		err := mod.Init(t.Context())
+		if !errors.Is(err, startErr) {
+			t.Errorf("Init() = %v, want to wrap %v", err, startErr)
+		}
+		if !errors.Is(err, rollbackErr) {
+			t.Errorf("Init() = %v, want to wrap %v", err, rollbackErr)
+		}
+	})
+}
+
+func TestAppModuleContext(t *testing.T) {
+	t.Run("CancelledContextAbortsInit", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		var called bool
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			called = true
+			return nil
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		err := mod.Init(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Init() = %v, want %v", err, context.Canceled)
+		}
+		if called {
+			t.Error("BeforeStart hook ran despite canceled context")
+		}
+		if got := mod.State(); got != StateFailed {
+			t.Errorf("State() = %v, want %v", got, StateFailed)
+		}
+	})
+
+	t.Run("CancellationBetweenHooks", func(t *testing.T) {
+		mod := &BaseAppModule{}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		var second bool
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			cancel()
+			return nil
+		})
+		mod.BeforeStart(func(_ context.Context, _ AppModule) error {
+			second = true
+			return nil
+		})
+
+		if err := mod.Init(ctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("Init() = %v, want %v", err, context.Canceled)
+		}
+		if second {
+			t.Error("second BeforeStart hook ran after context cancellation")
 		}
 	})
 }

@@ -20,7 +20,14 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - Four sets of lifecycle hooks; multiple hooks can be registered per phase and run in order.
 - Hooks can abort startup/shutdown by returning an `error`.
 - Idempotency guard: double `Init` or `Destroy` before `Init` returns a sentinel error.
+- Explicit lifecycle **state machine** (`Created → Initializing → Running → Destroying → Destroyed`, plus `Failed`) exposed via `State()`.
+- **Context-aware** lifecycle: hooks are skipped once the context is canceled.
+- **Atomic `Init`**: any start-hook failure (or context cancellation) triggers an automatic rollback (teardown hooks run in reverse order) and leaves the module in `StateFailed`.
 - Embeddable `BaseAppModule` — implement your own module by embedding it.
+- **Concurrency-safe**: lifecycle, hook registration and config access are mutex-guarded.
+- **Panic-safe hooks**: a panic in a hook is recovered and returned as an error.
+- Narrow capability interfaces (`Configurable` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
+- `New(opts ...Option)` constructor with functional options.
 
 ## Requirements
 
@@ -44,31 +51,72 @@ type AppModuleConfig interface {
 // HookFunc is a lifecycle hook.
 type HookFunc func(ctx context.Context, mod AppModule) error
 
-// AppModule describes a module lifecycle.
-type AppModule interface {
+// Narrow capability interfaces.
+type Configurable interface {
     SetConfig(config AppModuleConfig)
     Config() AppModuleConfig
+}
 
+type Lifecycle interface {
     Init(ctx context.Context) error
     Destroy(ctx context.Context) error
+}
 
+type HookRegistry interface {
     BeforeStart(fn HookFunc)
     AfterStart(fn HookFunc)
     BeforeDestroy(fn HookFunc)
     AfterDestroy(fn HookFunc)
 }
+
+// AppModule is composed of the narrow interfaces above.
+type AppModule interface {
+    Configurable
+    Lifecycle
+    HookRegistry
+}
 ```
 
-The lifecycle is guarded by an internal state flag. Calling `Init` twice returns
-`ErrAlreadyInitialized`; calling `Destroy` on a module that was not initialized
-returns `ErrNotInitialized`.
+`BaseAppModule` is safe for concurrent use by multiple goroutines, and a panic
+raised inside a hook is recovered and returned as an error.
+
+The lifecycle is an explicit state machine exposed through `State()`:
+
+```
+Created → Initializing → Running → Destroying → Destroyed
+```
+
+Calling `Init` while the module is running returns `ErrAlreadyInitialized`;
+calling `Destroy` on a module that is not running returns `ErrNotInitialized`.
+A destroyed (or failed) module can be initialized again.
+
+`Init` is **atomic**: if any start hook (`BeforeStart` or `AfterStart`) returns
+an error, or the context is canceled, the module automatically rolls back by
+running the teardown hooks (`BeforeDestroy`, then `AfterDestroy`) in reverse
+registration order and ends up in `StateFailed`. Rollback errors are joined with
+the original cause via `errors.Join`. The module is therefore never left
+half-started: `Init` either fully succeeds (`StateRunning`) or fails
+(`StateFailed`).
 
 ### Constructors
 
 | Function                       | Description                                   |
 |--------------------------------|-----------------------------------------------|
-| `NewConfig(name, version)`     | Creates a config with the given name/version. |
-| `DefaultConfig()`              | Returns a default config (`App Module`, `v0.0.1`). |
+| `NewConfig(name, version)`     | Creates a `Config` with the given name/version. |
+| `DefaultConfig()`              | Returns a default `Config` (`App Module`, `v0.0.1`). |
+| `New(opts ...Option)`          | Creates a `*BaseAppModule` configured with functional options. |
+
+Functional options: `WithConfig`, `WithBeforeStart`, `WithAfterStart`,
+`WithBeforeDestroy`, `WithAfterDestroy`.
+
+```go
+mod := appmod.New(
+    appmod.WithConfig(appmod.NewConfig("Cache", "v1.0.0")),
+    appmod.WithBeforeStart(func(ctx context.Context, m appmod.AppModule) error {
+        return nil
+    }),
+)
+```
 
 ## Usage
 
