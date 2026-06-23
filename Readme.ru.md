@@ -19,20 +19,28 @@
 - Чёткое разделение **контракта** (интерфейсы) и **базовой реализации**.
 - Жизненный цикл с поддержкой контекста: `Init(ctx)` / `Destroy(ctx)`.
 - Четыре набора хуков; на каждую фазу можно зарегистрировать несколько хуков, выполняемых по порядку.
-- **Именованные, приоритетные и удаляемые хуки** (`Hook`, `AddHook` / `RemoveHook`): в рамках фазы хуки выполняются в порядке возрастания приоритета.
+- **Именованные, приоритетные и удаляемые хуки** (`Hook`, `AddHook` / `RemoveHook`): в рамках фазы хуки выполняются в
+  порядке возрастания приоритета.
 - Хуки получают узкое read-only представление `HookModule` (конфиг/имя/состояние) вместо полного модуля.
-- Хуки способны прервать запуск/остановку через возврат `error`, который возвращается как типизированный `HookError` (фаза, индекс, имя, модуль).
-- Опциональное **структурированное логирование на уровне модуля** (`slog`): переходы жизненного цикла и длительность фаз.
+- Хуки способны прервать запуск/остановку через возврат `error`, который возвращается как типизированный `HookError` (
+  фаза, индекс, имя, модуль).
+- Опциональное **структурированное логирование на уровне модуля** (`slog`): переходы жизненного цикла и длительность
+  фаз.
 - Защита идемпотентности: повторный `Init` или `Destroy` до `Init` возвращает sentinel-ошибку.
-- Явная **машина состояний** жизненного цикла (`Created → Initializing → Running → Destroying → Destroyed`, плюс `Failed`), доступная через `State()`.
+- Явная **машина состояний** жизненного цикла (`Created → Initializing → Running → Destroying → Destroyed`, плюс
+  `Failed`), доступная через `State()`.
 - **Учёт контекста**: после отмены контекста оставшиеся хуки не выполняются.
-- **Атомарный `Init`**: ошибка любого стартового хука (или отмена контекста) запускает автоматический откат (teardown-хуки выполняются в обратном порядке) и оставляет модуль в `StateFailed`.
+- **Атомарный `Init`**: ошибка любого стартового хука (или отмена контекста) запускает автоматический откат (
+  teardown-хуки выполняются в обратном порядке) и оставляет модуль в `StateFailed`.
 - Встраиваемый `BaseAppModule` — реализуйте свой модуль через встраивание.
 - **Потокобезопасность**: жизненный цикл, регистрация хуков и доступ к конфигу защищены мьютексом.
 - **Защита от паник в хуках**: паника в хуке перехватывается и возвращается как ошибка.
-- Узкие интерфейсы возможностей (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`), составляющие `AppModule`.
+- Узкие интерфейсы возможностей (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`), составляющие
+  `AppModule`.
 - Конструктор `New(opts ...Option)` с функциональными опциями.
-- **Оркестратор модулей** `Manager`: запуск в порядке зависимостей (топологический) с параллельным стартом независимых модулей, остановка в обратном порядке, обнаружение циклов зависимостей, graceful shutdown по `SIGINT`/`SIGTERM` и опциональные health-проверки.
+- **Оркестратор модулей** `Manager`: запуск в порядке зависимостей (топологический) с параллельным стартом независимых
+  модулей, остановка в обратном порядке, обнаружение циклов зависимостей, graceful shutdown по `SIGINT`/`SIGTERM` и
+  опциональные health-проверки.
 
 ## Требования
 
@@ -49,55 +57,55 @@ go get github.com/efureev/appmod/v2
 ```go
 // AppModuleConfig описывает конфигурацию модуля.
 type AppModuleConfig interface {
-Name() string
-Version() string
+    Name() string
+    Version() string
 }
 
 // HookFunc — хук жизненного цикла; получает узкое read-only представление.
-type HookFunc func(ctx context.Context, mod HookModule) error
+type HookFunc func (ctx context.Context, mod HookModule) error
 
 // Узкие интерфейсы возможностей.
 type Configurable interface {
-SetConfig(config AppModuleConfig)
-Config() AppModuleConfig
+  SetConfig(config AppModuleConfig)
+  Config() AppModuleConfig
 }
 
 type Named interface {
-Name() string
+    Name() string
 }
 
 type Stateful interface {
-State() State
+    State() State
 }
 
 // HookModule — узкое read-only представление, передаваемое в HookFunc.
 type HookModule interface {
-Configurable
-Named
-Stateful
+  Configurable
+  Named
+  Stateful
 }
 
 type Lifecycle interface {
-Init(ctx context.Context) error
-Destroy(ctx context.Context) error
+  Init(ctx context.Context) error
+  Destroy(ctx context.Context) error
 }
 
 type HookRegistry interface {
-BeforeStart(fn HookFunc)
-AfterStart(fn HookFunc)
-BeforeDestroy(fn HookFunc)
-AfterDestroy(fn HookFunc)
-AddHook(phase Phase, hook Hook)
-RemoveHook(phase Phase, name string) bool
+  BeforeStart(fn HookFunc)
+  AfterStart(fn HookFunc)
+  BeforeDestroy(fn HookFunc)
+  AfterDestroy(fn HookFunc)
+  AddHook(phase Phase, hook Hook)
+  RemoveHook(phase Phase, name string) bool
 }
 
 // AppModule составлен из узких интерфейсов выше.
 type AppModule interface {
-Configurable
-Named
-Stateful
-Lifecycle
-HookRegistry
+  Configurable
+  Named
+  Stateful
+  Lifecycle
+  HookRegistry
 }
 ```
 
@@ -124,10 +132,10 @@ Created → Initializing → Running → Destroying → Destroyed
 
 ### Конструкторы
 
-| Функция                    | Описание                                                 |
-|----------------------------|----------------------------------------------------------|
-| `NewConfig(name, version)` | Создаёт `Config` с заданными именем и версией.           |
-| `DefaultConfig()`          | Возвращает `Config` по умолчанию (`App Module`, `v0.0.1`). |
+| Функция                    | Описание                                                       |
+|----------------------------|----------------------------------------------------------------|
+| `NewConfig(name, version)` | Создаёт `Config` с заданными именем и версией.                 |
+| `DefaultConfig()`          | Возвращает `Config` по умолчанию (`App Module`, `v0.0.1`).     |
 | `New(opts ...Option)`      | Создаёт `*BaseAppModule`, настроенный функциональными опциями. |
 
 Функциональные опции: `WithConfig`, `WithModuleLogger`, `WithHook`,
@@ -142,9 +150,9 @@ Created → Initializing → Running → Destroying → Destroyed
 
 ```go
 mod.AddHook(appmod.PhaseBeforeStart, appmod.Hook{
-    Name:     "open-db",
-    Priority: -10, // выполнится раньше
-    Run: func(ctx context.Context, m appmod.HookModule) error { return nil },
+  Name:     "open-db",
+  Priority: -10, // выполнится раньше
+  Run: func (ctx context.Context, m appmod.HookModule) error { return nil },
 })
 mod.RemoveHook(appmod.PhaseBeforeStart, "open-db")
 ```
@@ -161,10 +169,10 @@ mod.RemoveHook(appmod.PhaseBeforeStart, "open-db")
 
 ```go
 mod := appmod.New(
-    appmod.WithConfig(appmod.NewConfig("Cache", "v1.0.0")),
-    appmod.WithBeforeStart(func(ctx context.Context, m appmod.AppModule) error {
-        return nil
-    }),
+  appmod.WithConfig(appmod.NewConfig("Cache", "v1.0.0")),
+  appmod.WithBeforeStart(func (ctx context.Context, m appmod.AppModule) error {
+    return nil
+  }),
 )
 ```
 
@@ -216,14 +224,14 @@ func main() {
 
 ```go
 type CacheModule struct {
-appmod.BaseAppModule
-// ваши собственные поля...
+  appmod.BaseAppModule
+  // ваши собственные поля...
 }
 
 func NewCacheModule() *CacheModule {
-m := &CacheModule{}
-m.SetConfig(appmod.NewConfig("Cache", "v1.0.0"))
-return m
+  m := &CacheModule{}
+  m.SetConfig(appmod.NewConfig("Cache", "v1.0.0"))
+  return m
 }
 ```
 
@@ -233,8 +241,8 @@ return m
 модуль считается незапущенным:
 
 ```go
-mod.BeforeStart(func(ctx context.Context, m appmod.AppModule) error {
-return fmt.Errorf("некорректная конфигурация")
+mod.BeforeStart(func (ctx context.Context, m appmod.AppModule) error {
+    return fmt.Errorf("некорректная конфигурация")
 })
 
 if err := mod.Init(ctx); err != nil {
@@ -255,8 +263,8 @@ mgr := appmod.NewManager(
     appmod.WithShutdownTimeout(10*time.Second),
 )
 _ = mgr.Register("db", db)
-_ = mgr.Register("cache", cache, "db")        // cache зависит от db
-_ = mgr.Register("api", api, "cache", "db")   // api зависит от обоих
+_ = mgr.Register("cache", cache, "db") // cache зависит от db
+_ = mgr.Register("api", api, "cache", "db") // api зависит от обоих
 
 // Старт, ожидание SIGINT/SIGTERM и graceful-остановка в обратном порядке.
 if err := mgr.Run(context.Background()); err != nil {
@@ -274,17 +282,17 @@ if err := mgr.Run(context.Background()); err != nil {
 
 Пакет разбит на небольшие файлы с чёткой зоной ответственности:
 
-| Файл         | Назначение                                                            |
-|--------------|-----------------------------------------------------------------------|
-| `appmod.go`  | Документация пакета и compile-time проверки контрактов.               |
+| Файл         | Назначение                                                                                                                     |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `appmod.go`  | Документация пакета и compile-time проверки контрактов.                                                                        |
 | `module.go`  | `AppModule` и узкие интерфейсы `Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`, `HookFunc`, `HookModule`. |
-| `config.go`  | `AppModuleConfig`, тип-значение `Config` и `NewConfig` / `DefaultConfig`. |
-| `state.go`   | Перечисление состояний `State` и его метод `String`.                  |
-| `errors.go`  | Sentinel-ошибки жизненного цикла.                                     |
-| `base.go`    | Встраиваемая реализация `BaseAppModule`.                              |
-| `hook.go`    | Типы `Phase` и `Hook`, типизированная ошибка `HookError`.             |
-| `options.go` | Функциональные опции и конструктор `New`.                             |
-| `manager.go` | Оркестратор `Manager`: запуск/остановка по зависимостям, graceful shutdown, health-проверки. |
+| `config.go`  | `AppModuleConfig`, тип-значение `Config` и `NewConfig` / `DefaultConfig`.                                                      |
+| `state.go`   | Перечисление состояний `State` и его метод `String`.                                                                           |
+| `errors.go`  | Sentinel-ошибки жизненного цикла.                                                                                              |
+| `base.go`    | Встраиваемая реализация `BaseAppModule`.                                                                                       |
+| `hook.go`    | Типы `Phase` и `Hook`, типизированная ошибка `HookError`.                                                                      |
+| `options.go` | Функциональные опции и конструктор `New`.                                                                                      |
+| `manager.go` | Оркестратор `Manager`: запуск/остановка по зависимостям, graceful shutdown, health-проверки.                                   |
 
 ## Разработка
 
