@@ -268,6 +268,65 @@ returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
 if the graph has a cycle. A failed `Start` rolls back the modules that already
 started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
 
+`Run` delegates its graceful-shutdown sequence (signal handling and the
+timeout-bounded teardown) to
+[`github.com/efureev/go-shutdown`](https://github.com/efureev/go-shutdown): it
+stops on `SIGINT`/`SIGTERM` or context cancellation, then runs `Stop` bounded by
+`WithShutdownTimeout`, returning `shutdown.ErrShutdownTimeout` if the teardown
+does not finish in time. `Stop` honors context cancellation between modules, so
+once the timeout fires it aborts promptly instead of leaking in a detached
+goroutine; modules not yet stopped are retained for a subsequent `Stop`.
+
+### Communication between modules
+
+The dependency graph only fixes the *order* in which modules start; for
+run-time communication the `Manager` shares an `AppContext` (an `EventBus`, a
+`Registry` and the logger) and injects it into every module that implements
+`ContextAware`. `BaseAppModule` already implements it, so an embedding module
+reaches the shared services via `m.AppContext()`. Use `Manager.EventBus()` and
+`Manager.Registry()` to reach the same instances from outside.
+
+There are two complementary mechanisms:
+
+**Registry — pull (request/response).** A module *provides* an implementation of
+a contract interface; a dependent module *requires* it. Because the contract is
+keyed by its Go type, consumers depend on the interface, not on the concrete
+module. A `Require[T]` is guaranteed to find its provider as long as the consumer
+declares a `Manager` dependency on the providing module (the provider's
+`AfterStart` runs first).
+
+```go
+type DB interface{ Query(ctx context.Context, key string) (string, error) }
+
+// db module — in its AfterStart:
+_ = appmod.Provide[DB](m.AppContext().Registry, m) // m implements DB
+
+// cache module (depends on "db") — in its AfterStart:
+db, err := appmod.Require[DB](m.AppContext().Registry)
+```
+
+**EventBus — push (fire-and-forget).** A module *subscribes* to a value type and
+any module *publishes* values of that type. Delivery is synchronous, type-safe,
+panic-safe and joins subscriber errors via `errors.Join`.
+
+```go
+type UserCreated struct{ ID string }
+
+// subscriber (e.g. cache, during its start):
+unsub, _ := appmod.Subscribe(m.AppContext().Bus, func(_ context.Context, e UserCreated) error {
+    // invalidate, react, ...
+    return nil
+})
+defer unsub() // or unsubscribe in BeforeDestroy
+
+// publisher (e.g. api, later):
+_ = appmod.Publish(ctx, m.AppContext().Bus, UserCreated{ID: "user:1"})
+```
+
+Rule of thumb: use the **Registry** when one module owns data and a caller needs
+an answer (`api → cache → db`); use the **EventBus** to broadcast a fact to any
+number of interested listeners without expecting a reply.
+
 ## Examples
 
 Runnable example applications live under [`examples/`](examples) and cover every
@@ -277,7 +336,7 @@ feature of the package:
 | --- | --- |
 | [`basic`](examples/basic)     | Single-module lifecycle: configuration, the four hooks and the `Created → Running → Destroyed` state machine. |
 | [`hooks`](examples/hooks)     | `New(...)` options, `slog` logging, named/prioritized hooks (`AddHook`/`RemoveHook`), the typed `HookError` and automatic rollback. |
-| [`manager`](examples/manager) | `Manager` orchestration of a dependency graph: topological start, concurrent start of independent modules, `HealthChecker`/`Health` and graceful `Run`. |
+| [`manager`](examples/manager) | `Manager` orchestration of a dependency graph, plus inter-module communication: `api → cache → db` data access via `Provide`/`Require` and a `UserCreated` event via the `EventBus`. |
 
 ```bash
 go run ./examples/basic
@@ -300,6 +359,9 @@ The package is split into small, focused files:
 | `hook.go`    | The `Phase` and `Hook` types and the typed `HookError`.               |
 | `options.go` | Functional options and the `New` constructor.                         |
 | `manager.go` | The `Manager` orchestrator: dependency-ordered start/stop, graceful shutdown, health checks. |
+| `eventbus.go` | The type-safe `EventBus` for fire-and-forget notifications (`Subscribe`/`Publish`). |
+| `registry.go` | The type-safe `Registry` for contract-based access between modules (`Provide`/`Require`/`Revoke`). |
+| `appcontext.go` | The shared `AppContext` (`EventBus` + `Registry` + logger) and the `ContextAware` capability. |
 
 ## Development
 

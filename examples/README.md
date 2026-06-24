@@ -8,7 +8,7 @@ repository root.
 | --- | --- |
 | [`basic`](./basic) | The lifecycle of a single `BaseAppModule`: configuration, the four lifecycle hooks (`BeforeStart`/`AfterStart`/`BeforeDestroy`/`AfterDestroy`) and the state machine (`Created → Running → Destroyed`). |
 | [`hooks`](./hooks) | Advanced hook features: the `New(...)` functional-options constructor, a structured `slog` logger, named/prioritized hooks via `AddHook`, removal via `RemoveHook`, the typed `*HookError`, and automatic rollback to `StateFailed` on a failing start hook. |
-| [`manager`](./manager) | Orchestrating a dependency graph with `Manager`: a custom module that embeds `BaseAppModule` and implements `HealthChecker`, topological start / reverse stop, concurrent start of independent modules, `Health` probing and graceful shutdown via `Run`. |
+| [`manager`](./manager) | Orchestrating a dependency graph with `Manager`, plus inter-module communication: pull (request/response) via the shared `Registry` (`db` provides `DB`, `cache` requires `DB` and provides `Cache`, `api` requires both — `api → cache → db`) and push (fire-and-forget) via the shared `EventBus` (`api` publishes `UserCreated`, `cache` reacts), all sharing the `AppContext` the `Manager` injects. |
 
 ## Running
 

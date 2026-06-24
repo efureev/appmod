@@ -47,15 +47,27 @@
 //	options.go — the functional options and the New constructor.
 //	manager.go — the Manager orchestrator: dependency-ordered start/stop of
 //	             multiple modules, graceful shutdown and health checks.
+//	eventbus.go — the type-safe EventBus for fire-and-forget notifications
+//	             (Subscribe / Publish).
+//	registry.go — the type-safe Registry for contract-based request/response
+//	             access between modules (Provide / Require / Revoke).
+//	appcontext.go — the shared AppContext (EventBus + Registry + Logger) and the
+//	             ContextAware capability used by the Manager to inject it.
 //
 // For applications composed of several inter-dependent modules, [Manager]
 // orchestrates them: modules are registered with their dependencies and started
 // in topological order (independent modules concurrently) and stopped in the
 // reverse order.
+//
+// Modules communicate at run time through two complementary mechanisms shared
+// via the [AppContext] that the Manager injects into every [ContextAware]
+// module: the [EventBus] for fire-and-forget notifications (push) and the
+// [Registry] for contract-based request/response access between modules (pull).
 package appmod
 
 // Compile-time checks that the contracts are satisfied.
 var (
 	_ AppModule       = (*BaseAppModule)(nil)
 	_ AppModuleConfig = Config{}
+	_ ContextAware    = (*BaseAppModule)(nil)
 )
