@@ -19,6 +19,7 @@ type BaseAppModule struct {
 
 	config AppModuleConfig
 	logger *slog.Logger
+	appCtx *AppContext
 
 	beforeStartHooks   []Hook
 	afterStartHooks    []Hook
@@ -72,6 +73,25 @@ func (b *BaseAppModule) SetLogger(logger *slog.Logger) {
 	defer b.mu.Unlock()
 
 	b.logger = logger
+}
+
+// SetAppContext stores the shared [AppContext] injected by a [Manager]. It makes
+// *BaseAppModule satisfy [ContextAware].
+func (b *BaseAppModule) SetAppContext(c *AppContext) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.appCtx = c
+}
+
+// AppContext returns the shared [AppContext] previously injected with
+// [BaseAppModule.SetAppContext], or nil if none was set. Use it to reach the
+// shared [EventBus] (Bus) and [Registry] (Registry).
+func (b *BaseAppModule) AppContext() *AppContext {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.appCtx
 }
 
 // log returns the configured logger or a no-op one. The caller must not hold mu.

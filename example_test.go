@@ -101,3 +101,47 @@ func ExampleManager() {
 	// stop cache
 	// stop db
 }
+
+// ExampleEventBus demonstrates fire-and-forget (push) communication: a module
+// subscribes to a typed event and another publishes it.
+func ExampleEventBus() {
+	type UserCreated struct{ ID string }
+
+	bus := NewEventBus()
+
+	_, _ = Subscribe(bus, func(_ context.Context, e UserCreated) error {
+		fmt.Println("user created:", e.ID)
+		return nil
+	})
+
+	_ = Publish(context.Background(), bus, UserCreated{ID: "user:1"})
+
+	// Output:
+	// user created: user:1
+}
+
+// ExampleRegistry demonstrates request/response (pull) communication: one
+// module provides a contract and another requires it.
+func ExampleRegistry() {
+	type Greeter interface{ Greet() string }
+
+	reg := NewRegistry()
+
+	// The provider registers an implementation of the Greeter contract.
+	_ = Provide[Greeter](reg, greeterImpl{})
+
+	// A consumer obtains the contract without knowing the concrete type.
+	g, err := Require[Greeter](reg)
+	if err != nil {
+		fmt.Println("require failed:", err)
+		return
+	}
+	fmt.Println(g.Greet())
+
+	// Output:
+	// hello
+}
+
+type greeterImpl struct{}
+
+func (greeterImpl) Greet() string { return "hello" }

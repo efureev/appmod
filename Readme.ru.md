@@ -288,6 +288,57 @@ if err := mgr.Run(context.Background()); err != nil {
 работать в отдельной горутине; неостановленные модули сохраняются для
 последующего `Stop`.
 
+### Общение между модулями
+
+Граф зависимостей задаёт только *порядок* старта; для общения в рантайме
+`Manager` создаёт общий `AppContext` (`EventBus`, `Registry` и логгер) и
+внедряет его в каждый модуль, реализующий `ContextAware`. `BaseAppModule` уже
+реализует этот интерфейс, поэтому встраивающий модуль получает общие сервисы
+через `m.AppContext()`. Снаружи те же экземпляры доступны через
+`Manager.EventBus()` и `Manager.Registry()`.
+
+Есть два взаимодополняющих механизма:
+
+**Registry — pull (запрос/ответ).** Модуль *предоставляет* реализацию
+контракта-интерфейса, а зависимый модуль её *запрашивает*. Контракт ключуется
+по Go-типу, поэтому потребитель зависит от интерфейса, а не от конкретного
+модуля. `Require[T]` гарантированно находит поставщика, если потребитель
+объявил зависимость `Manager` от предоставляющего модуля (его `AfterStart`
+выполняется раньше).
+
+```go
+type DB interface{ Query(ctx context.Context, key string) (string, error) }
+
+// модуль db — в его AfterStart:
+_ = appmod.Provide[DB](m.AppContext().Registry, m) // m реализует DB
+
+// модуль cache (зависит от "db") — в его AfterStart:
+db, err := appmod.Require[DB](m.AppContext().Registry)
+```
+
+**EventBus — push (без ответа).** Модуль *подписывается* на тип-значение, а
+любой модуль *публикует* значения этого типа. Доставка синхронная,
+типобезопасная, защищена от паник и объединяет ошибки подписчиков через
+`errors.Join`.
+
+```go
+type UserCreated struct{ ID string }
+
+// подписчик (например, cache, во время старта):
+unsub, _ := appmod.Subscribe(m.AppContext().Bus, func(_ context.Context, e UserCreated) error {
+    // инвалидация, реакция, ...
+    return nil
+})
+defer unsub() // либо снять подписку в BeforeDestroy
+
+// публикатор (например, api, позже):
+_ = appmod.Publish(ctx, m.AppContext().Bus, UserCreated{ID: "user:1"})
+```
+
+Правило: используйте **Registry**, когда данными владеет один модуль, а вызвавшему
+нужен ответ (`api → cache → db`); используйте **EventBus**, чтобы оповестить о
+факте любое число слушателей без ожидания ответа.
+
 ## Примеры
 
 Готовые к запуску примеры приложений лежат в [`examples/`](examples) и
@@ -297,7 +348,7 @@ if err := mgr.Run(context.Background()); err != nil {
 |-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [`basic`](examples/basic)     | Жизненный цикл одного модуля: конфигурация, четыре хука и машина состояний `Created → Running → Destroyed`.                                                   |
 | [`hooks`](examples/hooks)     | Опции `New(...)`, логирование через `slog`, именованные/приоритетные хуки (`AddHook`/`RemoveHook`), типизированная ошибка `HookError` и автоматический откат. |
-| [`manager`](examples/manager) | Оркестрация графа модулей через `Manager`: топологический запуск, параллельный старт независимых модулей, `HealthChecker`/`Health` и graceful `Run`.          |
+| [`manager`](examples/manager) | Оркестрация графа модулей через `Manager` и общение модулей: доступ к данным `api → cache → db` через `Provide`/`Require` и событие `UserCreated` через `EventBus`. |
 
 ```bash
 go run ./examples/basic
@@ -320,6 +371,9 @@ go run ./examples/manager
 | `hook.go`    | Типы `Phase` и `Hook`, типизированная ошибка `HookError`.                                                                      |
 | `options.go` | Функциональные опции и конструктор `New`.                                                                                      |
 | `manager.go` | Оркестратор `Manager`: запуск/остановка по зависимостям, graceful shutdown, health-проверки.                                   |
+| `eventbus.go` | Типобезопасный `EventBus` для уведомлений без ответа (`Subscribe`/`Publish`).                                                 |
+| `registry.go` | Типобезопасный `Registry` для доступа между модулями по контракту (`Provide`/`Require`/`Revoke`).                            |
+| `appcontext.go` | Общий `AppContext` (`EventBus` + `Registry` + логгер) и возможность `ContextAware`.                                        |
 
 ## Разработка
 

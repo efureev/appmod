@@ -48,6 +48,10 @@ type Manager struct {
 
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
+
+	// appCtx is the shared context (EventBus + Registry + Logger) injected into
+	// every ContextAware module before Start.
+	appCtx *AppContext
 }
 
 // ManagerOption configures a [Manager] created with [NewManager].
@@ -75,9 +79,20 @@ func NewManager(opts ...ManagerOption) *Manager {
 	if m.logger == nil {
 		m.logger = slog.New(slog.DiscardHandler)
 	}
+	m.appCtx = &AppContext{
+		Bus:      NewEventBus(),
+		Registry: NewRegistry(),
+		Logger:   m.logger,
+	}
 
 	return m
 }
+
+// EventBus returns the shared [EventBus] injected into the manager's modules.
+func (m *Manager) EventBus() *EventBus { return m.appCtx.Bus }
+
+// Registry returns the shared [Registry] injected into the manager's modules.
+func (m *Manager) Registry() *Registry { return m.appCtx.Registry }
 
 // Register adds a module under the given name, declaring the names of the
 // modules it depends on. Dependencies may be registered before or after the
@@ -117,6 +132,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 
+	m.injectContext()
+
 	for _, layer := range layers {
 		if err := ctx.Err(); err != nil {
 			return m.abort(ctx, err)
@@ -127,6 +144,24 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// injectContext hands the shared [AppContext] to every registered module that
+// implements [ContextAware], so modules can reach the shared [EventBus] and
+// [Registry] before they are started.
+func (m *Manager) injectContext() {
+	m.mu.Lock()
+	modules := make([]AppModule, 0, len(m.nodes))
+	for _, n := range m.nodes {
+		modules = append(modules, n.module)
+	}
+	m.mu.Unlock()
+
+	for _, mod := range modules {
+		if ca, ok := mod.(ContextAware); ok {
+			ca.SetAppContext(m.appCtx)
+		}
+	}
 }
 
 // startLayer initializes all modules in a layer concurrently and joins their

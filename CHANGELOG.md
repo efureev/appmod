@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Inter-module communication** through two complementary mechanisms shared via
+  a new `AppContext` (`Bus` + `Registry` + `Logger`) that the `Manager` injects
+  into every `ContextAware` module before start (`BaseAppModule` implements
+  `ContextAware`; reach the context via `m.AppContext()`):
+  - **`EventBus`** (push / fire-and-forget): a type-safe publish/subscribe bus.
+    `Subscribe[T](bus, fn)` registers a handler for events of type `T` and
+    returns an idempotent `Unsubscribe`; `Publish[T](ctx, bus, ev)` delivers
+    synchronously, joins subscriber errors via `errors.Join`, recovers panics and
+    honors context cancellation. `Close` removes all subscriptions. Sentinel
+    errors `ErrNilBus`, `ErrNilSubscriber`, `ErrBusClosed`.
+  - **`Registry`** (pull / request-response): a type-safe service locator.
+    `Provide[T](reg, impl)` publishes an implementation of contract `T` (usually
+    an interface); `Require[T](reg)` obtains it; `Revoke[T](reg)` removes it.
+    Sentinel errors `ErrNilRegistry`, `ErrDuplicateProvider`, `ErrProviderNotFound`.
+  - `Manager` exposes the shared services via `Manager.EventBus()` /
+    `Manager.Registry()`. The `examples/manager` example was reworked to show
+    `api → cache → db` data access through `Require`/`Provide` and a `UserCreated`
+    event delivered through the bus.
+
 - **Configurable graceful shutdown** in `Manager.Run`: the signal handling and
   the timeout-bounded teardown are now delegated to
   `github.com/efureev/go-shutdown/v2` (`OnDestroy → Manager.Stop`). `Run` still

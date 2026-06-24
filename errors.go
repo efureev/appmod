@@ -28,3 +28,28 @@ var (
 	// graph contains a cycle.
 	ErrDependencyCycle = errors.New("appmod: dependency cycle detected")
 )
+
+// EventBus errors returned by [EventBus], [Subscribe] and [Publish].
+var (
+	// ErrNilBus is returned when a nil [EventBus] is passed to [Subscribe] or
+	// [Publish].
+	ErrNilBus = errors.New("appmod: event bus must not be nil")
+	// ErrNilSubscriber is returned by [Subscribe] when the handler is nil.
+	ErrNilSubscriber = errors.New("appmod: event subscriber must not be nil")
+	// ErrBusClosed is returned by [Subscribe] and [Publish] after the bus has
+	// been closed.
+	ErrBusClosed = errors.New("appmod: event bus is closed")
+)
+
+// Registry errors returned by [Registry], [Provide] and [Require].
+var (
+	// ErrNilRegistry is returned when a nil [Registry] is passed to [Provide],
+	// [Require] or [Revoke].
+	ErrNilRegistry = errors.New("appmod: registry must not be nil")
+	// ErrDuplicateProvider is returned by [Provide] when a contract of the same
+	// type has already been provided.
+	ErrDuplicateProvider = errors.New("appmod: contract already provided")
+	// ErrProviderNotFound is returned by [Require] when no provider has been
+	// registered for the requested contract.
+	ErrProviderNotFound = errors.New("appmod: contract provider not found")
+)
