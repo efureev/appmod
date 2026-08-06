@@ -9,10 +9,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
-
-	shutdown "github.com/efureev/go-shutdown/v2"
 )
 
 // recordingModule is a test module that records start/stop ordering into a
@@ -578,8 +577,8 @@ func TestManagerRun(t *testing.T) {
 
 		select {
 		case err := <-done:
-			if !errors.Is(err, shutdown.ErrShutdownTimeout) {
-				t.Errorf("Run() = %v, want to wrap %v", err, shutdown.ErrShutdownTimeout)
+			if !errors.Is(err, ErrShutdownTimeout) {
+				t.Errorf("Run() = %v, want to wrap %v", err, ErrShutdownTimeout)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("Run() did not return after the shutdown timeout")
@@ -800,5 +799,261 @@ func TestManagerStartContextCanceled(t *testing.T) {
 	// The manager is left stoppable and startable again.
 	if err := mgr.Start(t.Context()); err != nil {
 		t.Errorf("Start() after a canceled attempt = %v, want nil", err)
+	}
+}
+
+// TestManagerRunSingleUse pins the guard on the single-use shutdown sequence.
+// Without it a second Run would start the modules and return the first Run's
+// cached result immediately, never stopping anything.
+func TestManagerRunSingleUse(t *testing.T) {
+	log := &eventLog{}
+	mgr := NewManager()
+	mustRegister(t, mgr, "db", newRecordingModule("db", log))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(ctx) }()
+
+	waitFor(t, func() bool { return slices.Contains(log.snapshot(), "start:db") })
+	cancel()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	if err := mgr.Run(t.Context()); !errors.Is(err, ErrAlreadyRun) {
+		t.Errorf("second Run() = %v, want %v", err, ErrAlreadyRun)
+	}
+	// The refused Run must not have restarted anything.
+	want := []string{"start:db", "stop:db"}
+	if got := log.snapshot(); !slices.Equal(got, want) {
+		t.Errorf("event log = %v, want %v", got, want)
+	}
+}
+
+// TestManagerRunTimeoutNamesModules covers describeTimeout: go-shutdown can only
+// report the single hook it was given, so Run annotates the timeout with the
+// modules Stop did not get to.
+func TestManagerRunTimeoutNamesModules(t *testing.T) {
+	const timeout = 50 * time.Millisecond
+
+	mgr := NewManager(WithShutdownTimeout(timeout))
+	mustRegister(t, mgr, "slow", newBlockingModule("slow", 20*timeout))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(ctx) }()
+
+	waitFor(t, func() bool { return mgr.Modules() != nil && len(mgr.startedNames()) == 1 })
+	cancel()
+
+	err := <-done
+	if !errors.Is(err, ErrShutdownTimeout) {
+		t.Fatalf("Run() = %v, want to wrap %v", err, ErrShutdownTimeout)
+	}
+	if !strings.Contains(err.Error(), "slow") {
+		t.Errorf("Run() = %v, want the error to name the module that hung", err)
+	}
+	// ErrShutdownTimeout wraps context.DeadlineExceeded, per the shutdown package.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run() = %v, want to wrap %v", err, context.DeadlineExceeded)
+	}
+}
+
+// TestManagerExitCode covers the exit code an application passes to os.Exit.
+func TestManagerExitCode(t *testing.T) {
+	mgr := NewManager()
+	mustRegister(t, mgr, "db", newRecordingModule("db", &eventLog{}))
+
+	if got := mgr.ExitCode(); got != 0 {
+		t.Errorf("ExitCode() before Run = %d, want 0", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(ctx) }()
+
+	waitFor(t, func() bool { return len(mgr.startedNames()) == 1 })
+	cancel()
+	<-done
+
+	// A context-triggered shutdown is not a signal, so the process exits cleanly.
+	if got := mgr.ExitCode(); got != 0 {
+		t.Errorf("ExitCode() after a context shutdown = %d, want 0", got)
+	}
+}
+
+// TestManagerShutdown covers the manual trigger: it must wake a blocked Run
+// exactly as a signal would.
+func TestManagerShutdown(t *testing.T) {
+	log := &eventLog{}
+	mgr := NewManager()
+	mustRegister(t, mgr, "db", newRecordingModule("db", log))
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(context.Background()) }()
+
+	waitFor(t, func() bool { return slices.Contains(log.snapshot(), "start:db") })
+	mgr.Shutdown()
+	mgr.Shutdown() // idempotent
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run() = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown() did not wake Run")
+	}
+	if !slices.Contains(log.snapshot(), "stop:db") {
+		t.Errorf("modules were not stopped: %v", log.snapshot())
+	}
+}
+
+// TestAppContextShutdownObservation covers the capability v3 made possible: a
+// module learns that the application is going down without waiting for its own
+// Destroy, which only runs after everything depending on it has stopped.
+func TestAppContextShutdownObservation(t *testing.T) {
+	t.Run("ClosesOnRun", func(t *testing.T) {
+		mgr := NewManager()
+
+		observed := make(chan struct{})
+		mod := New(WithConfig(NewConfig("worker", "v1")))
+		mod.AfterStart(func(_ context.Context, _ HookModule) error {
+			go func() {
+				<-mod.AppContext().Done()
+				close(observed)
+			}()
+
+			return nil
+		})
+		mustRegister(t, mgr, "worker", mod)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- mgr.Run(ctx) }()
+
+		waitFor(t, func() bool { return mod.State() == StateRunning })
+		select {
+		case <-observed:
+			t.Fatal("Done() closed before the shutdown started")
+		default:
+		}
+
+		cancel()
+		select {
+		case <-observed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Done() never closed")
+		}
+		<-done
+	})
+
+	t.Run("ClosesOnDirectStop", func(t *testing.T) {
+		mgr := NewManager()
+		mod := New(WithConfig(NewConfig("worker", "v1")))
+		mustRegister(t, mgr, "worker", mod)
+
+		if err := mgr.Start(t.Context()); err != nil {
+			t.Fatalf("Start() = %v, want nil", err)
+		}
+		select {
+		case <-mod.AppContext().Done():
+			t.Fatal("Done() closed while the application was running")
+		default:
+		}
+
+		if err := mgr.Stop(t.Context()); err != nil {
+			t.Fatalf("Stop() = %v, want nil", err)
+		}
+		select {
+		case <-mod.AppContext().Done():
+		default:
+			t.Error("Done() did not close after a direct Stop")
+		}
+
+		// Context() carries the same signal, for work that takes a context.
+		shutCtx := mod.AppContext().Context()
+		if shutCtx == context.Background() {
+			t.Fatal("Context() = context.Background(), want the shutdown context")
+		}
+		if err := shutCtx.Err(); err == nil {
+			t.Error("Context() is not canceled after the shutdown started")
+		}
+	})
+
+	t.Run("HandBuiltContextNeverShutsDown", func(t *testing.T) {
+		// AppContext is a public struct; one assembled by hand has no shutdown to
+		// observe and must not panic.
+		ac := &AppContext{Bus: NewEventBus(), Registry: NewRegistry()}
+
+		if ac.Done() != nil {
+			t.Error("Done() = non-nil, want a nil channel that blocks forever")
+		}
+		if ac.Context() != context.Background() {
+			t.Error("Context() = custom, want context.Background()")
+		}
+
+		var nilCtx *AppContext
+		if nilCtx.Done() != nil || nilCtx.Context() != context.Background() {
+			t.Error("a nil *AppContext must report no shutdown rather than panic")
+		}
+	})
+}
+
+// TestManagerSignalOptions covers the two options that reach the shutdown
+// sequence. They are checked through behavior: a manager configured with them
+// still starts, stops and observes shutdown normally.
+func TestManagerSignalOptions(t *testing.T) {
+	log := &eventLog{}
+	mgr := NewManager(
+		WithSignals(syscall.SIGUSR1),
+		WithForceOnSecondSignal(false),
+	)
+	mustRegister(t, mgr, "db", newRecordingModule("db", log))
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(context.Background()) }()
+
+	waitFor(t, func() bool { return slices.Contains(log.snapshot(), "start:db") })
+
+	// SIGINT is no longer watched, so only the explicit trigger ends the run.
+	mgr.Shutdown()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run() = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not return")
+	}
+	if !slices.Contains(log.snapshot(), "stop:db") {
+		t.Errorf("modules were not stopped: %v", log.snapshot())
+	}
+}
+
+// TestDescribeTimeoutWithoutRemainingModules covers the branch where the budget
+// ran out but the teardown had in fact finished: there is nothing to name, so
+// the error is passed through unchanged.
+func TestDescribeTimeoutWithoutRemainingModules(t *testing.T) {
+	mgr := NewManager()
+
+	if got := mgr.describeTimeout(nil); got != nil {
+		t.Errorf("describeTimeout(nil) = %v, want nil", got)
+	}
+
+	other := errors.New("not a timeout")
+	if got := mgr.describeTimeout(other); !errors.Is(got, other) {
+		t.Errorf("describeTimeout(other) = %v, want it untouched", got)
+	}
+
+	// No module is started, so the timeout carries no module list.
+	got := mgr.describeTimeout(ErrShutdownTimeout)
+	if !errors.Is(got, ErrShutdownTimeout) {
+		t.Fatalf("describeTimeout() = %v, want to wrap %v", got, ErrShutdownTimeout)
+	}
+	if strings.Contains(got.Error(), "still running") {
+		t.Errorf("describeTimeout() = %v, want no module list when nothing is started", got)
 	}
 }

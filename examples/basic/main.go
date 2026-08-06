@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/efureev/appmod/v2"
+	"github.com/efureev/appmod/v3"
 )
 
 func main() {
