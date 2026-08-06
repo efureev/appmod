@@ -31,6 +31,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - **Panic-safe hooks**: a panic in a hook is recovered and returned as an error.
 - Narrow capability interfaces (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
 - `New(opts ...Option)` constructor with functional options.
+- **Shutdown observation** (`AppContext.Done()`): a module reacts to the shutdown as it starts, without blocking and without waiting for its own `Destroy`.
 - **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, layered reverse-order stop that is likewise concurrent within a layer, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
 - **Lifecycle-scoped compensations** (`AddCleanup`, `SubscribeModule`): the release is registered next to the acquisition and runs on `Destroy` and on rollback.
 
@@ -41,7 +42,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 ## Install
 
 ```bash
-go get github.com/efureev/appmod/v2
+go get github.com/efureev/appmod/v3
 ```
 
 ## API Overview
@@ -219,7 +220,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/efureev/appmod/v2"
+	"github.com/efureev/appmod/v3"
 )
 
 func main() {
@@ -315,6 +316,40 @@ teardown per layer rather than the sum over all modules — which is what used t
 overrun a `WithShutdownTimeout` budget on an application of mostly independent
 modules. Ordering between layers is unchanged: a module is always stopped before
 the modules it depends on.
+
+Every module can observe the shutdown as soon as it begins, through the
+`AppContext` the manager injected — useful for a background loop that should
+stop taking new work before its layer is torn down:
+
+```go
+go func() {
+    for {
+        select {
+        case <-m.AppContext().Done():
+            return // shutdown started: stop taking new work
+        case job := <-jobs:
+            process(job)
+        }
+    }
+}()
+```
+
+`Done()` closes for any teardown the manager performs, including the rollback of
+a failed `Start`. `AppContext.Context()` gives the same signal as a context, safe
+to derive request-scoped contexts from.
+
+`Run` waits for `SIGINT`, `SIGTERM` or `SIGQUIT` by default (`WithSignals`
+replaces the set), for the context to be canceled, or for `Manager.Shutdown()`.
+A **second signal while the teardown is running terminates the process** with
+exit code 128+signum — the operator's way out of a teardown that hung, since the
+signal handler is installed and a second Ctrl-C would otherwise go nowhere.
+Disable it with `WithForceOnSecondSignal(false)`, and note that this leaves
+SIGKILL as the only way to stop a module that ignores its context.
+`Manager.ExitCode()` reports the matching exit code for `os.Exit`.
+
+`Run` is **single use**: the shutdown sequence runs exactly once, so a second
+call returns `ErrAlreadyRun`. A manager driven through `Start`/`Stop` can still
+be restarted.
 
 `Start` is **not re-entrant**: calling it on a manager that is already starting
 or running returns `ErrAlreadyStarted` and leaves the running modules untouched.
@@ -452,7 +487,7 @@ The package is split into small, focused files:
 | `manager.go` | The `Manager` orchestrator: dependency-ordered start/stop, graceful shutdown, health checks. |
 | `eventbus.go` | The type-safe `EventBus` for fire-and-forget notifications (`Subscribe`/`Publish`). |
 | `registry.go` | The type-safe `Registry` for contract-based access between modules (`Provide`/`Require`/`Revoke`). |
-| `appcontext.go` | The shared `AppContext` (`EventBus` + `Registry` + logger) and the `ContextAware` capability. |
+| `appcontext.go` | The shared `AppContext` (`EventBus` + `Registry` + logger + the shutdown broadcast) and the `ContextAware` capability. |
 
 ## Development
 

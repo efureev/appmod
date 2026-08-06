@@ -23,10 +23,11 @@
 // ([ErrAlreadyInitialized] / [ErrNotInitialized]).
 //
 // Init is atomic with respect to failures: if any start hook fails or the
-// context is canceled, the already-executed work is rolled back by running the
-// teardown hooks in reverse order and the module ends up in [StateFailed]. The
-// lifecycle is context-aware — the context is checked between hooks, so a
-// canceled context aborts the remaining start/stop hooks.
+// context is canceled, the work that did happen is rolled back by unwinding the
+// compensations registered with [BaseAppModule.AddCleanup], in reverse order,
+// and the module ends up in [StateFailed]. The lifecycle is context-aware — the
+// context is checked between hooks, so a canceled context aborts the remaining
+// start/stop hooks.
 //
 // [BaseAppModule] is safe for concurrent use: lifecycle transitions, hook
 // registration and configuration access are guarded by a mutex. A panic in a
@@ -51,8 +52,9 @@
 //	             (Subscribe / SubscribeModule / Publish).
 //	registry.go — the type-safe Registry for contract-based request/response
 //	             access between modules (Provide / Require / Revoke).
-//	appcontext.go — the shared AppContext (EventBus + Registry + Logger) and the
-//	             ContextAware capability used by the Manager to inject it.
+//	appcontext.go — the shared AppContext (EventBus + Registry + Logger + the
+//	             shutdown broadcast) and the ContextAware capability used by the
+//	             Manager to inject it.
 //
 // For applications composed of several inter-dependent modules, [Manager]
 // orchestrates them: modules are registered with their dependencies and started
@@ -66,6 +68,11 @@
 // [Registry] for contract-based request/response access between modules (pull).
 // Both have a lifecycle-scoped form so a restarted module does not accumulate
 // stale registrations: [SubscribeModule] for the bus, [Revoke] for the registry.
+//
+// The AppContext also carries the shutdown broadcast: [AppContext.Done] closes
+// as soon as the application starts going down, so a module with a background
+// loop can stop taking new work immediately instead of waiting for its own
+// Destroy — which runs only after every module depending on it has stopped.
 package appmod
 
 // Compile-time checks that the contracts are satisfied.

@@ -1,6 +1,10 @@
 package appmod
 
-import "errors"
+import (
+	"errors"
+
+	shutdown "github.com/efureev/go-shutdown/v3"
+)
 
 // Lifecycle errors returned by [BaseAppModule].
 var (
@@ -27,6 +31,15 @@ var (
 	// ErrDependencyCycle is returned by [Manager.Start] when the dependency
 	// graph contains a cycle.
 	ErrDependencyCycle = errors.New("appmod: dependency cycle detected")
+	// ErrAlreadyRun is returned by the second [Manager.Run] on a manager. The
+	// shutdown sequence runs exactly once, so a second Run would otherwise start
+	// the modules and return immediately without ever stopping them.
+	ErrAlreadyRun = errors.New("appmod: manager already run")
+	// ErrShutdownTimeout is returned by [Manager.Run], wrapped, when the teardown
+	// exceeds [WithShutdownTimeout]. It is re-exported from the shutdown package
+	// so callers can check for it without importing that package themselves, and
+	// it wraps [context.DeadlineExceeded].
+	ErrShutdownTimeout = shutdown.ErrTimeout
 	// ErrAlreadyStarted is returned by [Manager.Start] when the manager is
 	// already starting or running, or when a previous teardown did not finish.
 	// Starting twice is refused instead of attempted, because a second Start

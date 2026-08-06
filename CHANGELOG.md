@@ -5,6 +5,102 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v3.0.0] 2026-08-06
+
+The module path becomes `github.com/efureev/appmod/v3`. Update imports:
+
+```go
+import "github.com/efureev/appmod/v3"
+```
+
+### Changed — breaking
+
+- **Migrated to `github.com/efureev/go-shutdown/v3`.** The dependency's redesign
+  removes an adapter, fixes a bug appmod was working around by hand, and adds a
+  capability the package could not offer before.
+
+- **`Manager.Run` is single use.** The shutdown sequence runs exactly once, so a
+  second `Run` returns the new `ErrAlreadyRun` instead of starting the modules
+  and returning immediately without ever stopping them. A manager driven through
+  `Start`/`Stop` can still be restarted.
+
+- **`Run` now also watches `SIGQUIT`.** It watched `SIGINT` and `SIGTERM`; the
+  set is the shutdown package's default and is replaceable with the new
+  `WithSignals`.
+
+- **A second signal during teardown terminates the process** with exit code
+  128+signum. This is new: v2 had no such behavior. It is the operator's only way
+  out of a teardown that hung — the signal handler is installed, so a second
+  Ctrl-C would otherwise be delivered to a channel nobody reads. Disable it with
+  the new `WithForceOnSecondSignal(false)`, which leaves SIGKILL as the only way
+  to stop a module that ignores its context.
+
+### Added
+
+- **Shutdown observation for modules**: `AppContext.Done()` and
+  `AppContext.Context()`. A module with a background loop can stop taking new
+  work the moment the shutdown starts, instead of waiting for its own `Destroy`
+  — which runs only after every module depending on it has already stopped.
+
+  ```go
+  go func() {
+      for {
+          select {
+          case <-m.AppContext().Done():
+              return // shutdown started
+          case job := <-jobs:
+              process(job)
+          }
+      }
+  }()
+  ```
+
+  It closes for any teardown the manager performs, including the rollback of a
+  failed `Start`. An `AppContext` assembled by hand — a public struct, so this
+  happens in tests — reports no shutdown rather than panicking. The `*shutdown`
+  type stays out of appmod's contract: the field is unexported and reached
+  through the two accessors. Demonstrated by the new `worker` module in
+  `examples/manager`. Covered by `TestAppContextShutdownObservation`.
+
+- `Manager.Shutdown()` triggers the shutdown a `Run` is waiting on, as a signal
+  would. Non-blocking and idempotent.
+- `Manager.ExitCode()` reports 128+signum for a signal-triggered shutdown and 0
+  otherwise, for `os.Exit`.
+- `WithSignals`, `WithForceOnSecondSignal` manager options.
+- `ErrShutdownTimeout` is re-exported from the shutdown package, so a caller can
+  check for a teardown timeout without importing that package. It wraps
+  `context.DeadlineExceeded`.
+
+### Fixed
+
+- **A shutdown timeout no longer hides which module hung.** The dependency can
+  only name the hook it was given, and appmod gives it one; `Run` now annotates
+  the timeout with the modules that were still running.
+
+  This exposed a real defect in `Manager.Stop`: it cleared `m.started` upfront
+  and put the leftovers back only when it reached its next cancellation check —
+  so while a module's `Destroy` was blocking, the manager reported that nothing
+  was started. `Stop` now removes each module from the set as it finishes, which
+  keeps `m.started` truthful at every instant and makes the retention logic
+  unnecessary. Covered by `TestManagerRunTimeoutNamesModules`.
+
+- **Removed appmod's workaround for a v2 deficiency.** `Run` detached the
+  teardown context from cancellation by hand, because v2 handed the teardown the
+  very context whose cancellation had triggered it. v3 detaches unconditionally,
+  so the workaround is gone; `TestManagerRun/ContextCancelStopsModules` remains
+  as the regression test.
+
+- **Corrected the package documentation**, which still described the rollback as
+  running the teardown hooks in reverse order. It has unwound the `AddCleanup`
+  compensations since v2.1.0; the doc comment on `Init` was updated then, the
+  package-level one was not.
+
+### Removed
+
+- The `slogShutdownLogger` adapter. v3 takes a `*slog.Logger` directly, which
+  also removes the one place in the package that stored a `context.Context` in a
+  struct field.
+
 ## [v2.1.0] 2026-08-06
 
 ### Changed — breaking

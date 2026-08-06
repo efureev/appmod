@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
+	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	shutdown "github.com/efureev/go-shutdown/v2"
+	shutdown "github.com/efureev/go-shutdown/v3"
 )
 
 // HealthChecker is an optional capability of a module. Modules registered in a
@@ -73,6 +74,15 @@ type Manager struct {
 
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
+	signals         []os.Signal
+	force           bool
+
+	// sh owns the signal handling and the shutdown broadcast. It is created in
+	// NewManager rather than in Run because AppContext hands its observation side
+	// to every module at injection time, which happens before Run.
+	sh *shutdown.Shutdown
+	// ran guards the single-use shutdown sequence; see [ErrAlreadyRun].
+	ran bool
 
 	// appCtx is the shared context (EventBus + Registry + Logger) injected into
 	// every ContextAware module before Start.
@@ -95,19 +105,49 @@ func WithShutdownTimeout(d time.Duration) ManagerOption {
 	return func(m *Manager) { m.shutdownTimeout = d }
 }
 
+// WithSignals replaces the OS signals [Manager.Run] reacts to. The default is
+// SIGINT, SIGTERM and SIGQUIT. Passing none keeps the default.
+func WithSignals(sigs ...os.Signal) ManagerOption {
+	return func(m *Manager) { m.signals = sigs }
+}
+
+// WithForceOnSecondSignal controls what happens when a watched signal arrives
+// while the modules are still being torn down.
+//
+// When enabled — the default — the process terminates immediately with exit code
+// 128+signum. That is what the OS would have done had the process not handled
+// signals at all, and it is the operator's only way out of a teardown that hung:
+// the signal handler is installed, so a second Ctrl-C would otherwise go to a
+// channel nobody reads.
+//
+// Disable it only when the teardown must never be interrupted, and note that
+// this leaves SIGKILL as the only way to stop a module that ignores its context.
+func WithForceOnSecondSignal(v bool) ManagerOption {
+	return func(m *Manager) { m.force = v }
+}
+
 // NewManager creates a [Manager] configured with the given options.
 func NewManager(opts ...ManagerOption) *Manager {
-	m := &Manager{nodes: make(map[string]*node)}
+	m := &Manager{nodes: make(map[string]*node), force: true}
 	for _, opt := range opts {
 		opt(m)
 	}
 	if m.logger == nil {
 		m.logger = discardLogger
 	}
+
+	m.sh = shutdown.New(
+		shutdown.WithLogger(m.logger),
+		shutdown.WithTimeout(m.shutdownTimeout),
+		shutdown.WithSignals(m.signals...),
+		shutdown.WithForceOnSecondSignal(m.force),
+	)
+
 	m.appCtx = &AppContext{
 		Bus:      NewEventBus(),
 		Registry: NewRegistry(),
 		Logger:   m.logger,
+		shutdown: m.sh.Context(),
 	}
 
 	return m
@@ -300,9 +340,14 @@ func (m *Manager) abort(ctx context.Context, cause error) error {
 // [WithShutdownTimeout] budget on an application whose modules are mostly
 // independent.
 func (m *Manager) Stop(ctx context.Context) error {
+	// Tell the observers before touching anything: a module watching
+	// AppContext().Done() must learn that the application is going down whether
+	// it was Run that decided so or a direct Stop — including the Stop that rolls
+	// back a failed Start.
+	m.sh.End()
+
 	m.mu.Lock()
 	started := slices.Clone(m.started)
-	m.started = nil
 	m.state = managerStopped
 	m.mu.Unlock()
 
@@ -313,13 +358,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 	layers := m.stopLayers(started)
 
 	var errs []error
-	for i, layer := range layers {
+	for _, layer := range layers {
 		if err := ctx.Err(); err != nil {
 			// Context canceled (e.g. shutdown timeout): stop iterating so the
-			// teardown does not leak as a detached goroutine. Put the modules
-			// that were not stopped back so a later Stop can finish the job.
-			remaining := m.retain(layers[i:])
-			m.logger.ErrorContext(ctx, "teardown aborted by context", "error", err, "remaining", remaining)
+			// teardown does not leak as a detached goroutine. Whatever has not
+			// been torn down is still in m.started, so a later Stop resumes there.
+			m.logger.ErrorContext(ctx, "teardown aborted by context",
+				"error", err, "remaining", len(m.startedNames()))
 			errs = append(errs, fmt.Errorf("appmod: teardown aborted: %w", err))
 
 			return errors.Join(errs...)
@@ -410,6 +455,9 @@ func (m *Manager) stopLayer(ctx context.Context, layer []string) []error {
 				m.logger.ErrorContext(ctx, "module failed to stop", "module", name, "error", err)
 				errs[i] = fmt.Errorf("appmod: module %q failed to stop: %w", name, err)
 			}
+			// Drop it whether or not Destroy succeeded: either way this Stop is
+			// done with it, and a module left in the set would be retried forever.
+			m.forget(name)
 		}()
 	}
 	wg.Wait()
@@ -417,82 +465,101 @@ func (m *Manager) stopLayer(ctx context.Context, layer []string) []error {
 	return slices.DeleteFunc(errs, func(err error) bool { return err == nil })
 }
 
-// retain puts the modules of the not-yet-processed teardown layers back into
-// m.started and reports how many. They are stored in start order — the reverse
-// of the teardown order — because that is what Stop expects to reverse again.
-func (m *Manager) retain(pending [][]string) int {
-	var names []string
-	for i := len(pending) - 1; i >= 0; i-- {
-		names = append(names, pending[i]...)
-	}
-
+// forget drops a module from the started set once this Stop is done with it.
+//
+// Removing them one by one, rather than clearing the set upfront and putting the
+// leftovers back on abort, keeps m.started truthful at every instant: a teardown
+// abandoned mid-flight — which is what a shutdown timeout does — leaves exactly
+// the modules that are still up, and both the resumed Stop and the timeout
+// diagnostic read it directly.
+func (m *Manager) forget(name string) {
 	m.mu.Lock()
-	m.started = append(names, m.started...)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
-	return len(names)
+	m.started = slices.DeleteFunc(m.started, func(n string) bool { return n == name })
 }
 
-// Run starts all modules and then blocks until the context is canceled or an
-// interrupt/termination signal (SIGINT, SIGTERM) is received, after which it
-// gracefully stops every module. If a shutdown timeout was configured (see
-// [WithShutdownTimeout]), Stop is bounded by it and a non-positive value means
-// no timeout.
+// Run starts all modules, then blocks until the context is canceled, one of the
+// watched signals arrives (see [WithSignals]) or [Manager.Shutdown] is called,
+// after which it gracefully stops every module.
 //
-// The graceful-shutdown sequence (signal handling and the bounded teardown) is
-// delegated to github.com/efureev/go-shutdown. When the teardown does not
-// finish within the configured timeout, Run returns [shutdown.ErrShutdownTimeout].
+// The signal handling and the bounded teardown are delegated to
+// github.com/efureev/go-shutdown. When the teardown does not finish within
+// [WithShutdownTimeout], Run returns an error wrapping [ErrShutdownTimeout],
+// annotated with the modules that were still running.
+//
+// Run is single use: the underlying shutdown sequence runs exactly once, so a
+// second call returns [ErrAlreadyRun] rather than silently returning the first
+// result without stopping anything. A manager driven through [Manager.Start] and
+// [Manager.Stop] can still be restarted.
 func (m *Manager) Run(ctx context.Context) error {
+	if err := m.beginRun(); err != nil {
+		return err
+	}
+
 	if err := m.Start(ctx); err != nil {
 		return err
 	}
 
-	sd := shutdown.New().
-		SetLogger(slogShutdownLogger{l: m.logger, ctx: ctx}).
-		SetTimeout(m.shutdownTimeout).
-		OnDestroy(func(ctx context.Context) error {
-			// Without a shutdown timeout the shutdown package hands us the very
-			// context passed to Run — and its cancellation is usually what woke
-			// Run in the first place. Tearing down with it would make Stop abort
-			// before the first module and leave everything running, so detach.
-			//
-			// With a timeout configured the context is already detached and
-			// bounded by it, and Stop must honor that: expiring the budget is
-			// exactly what it is there for.
-			if m.shutdownTimeout <= 0 {
-				ctx = context.WithoutCancel(ctx)
-			}
+	// One hook, not one per module: go-shutdown could drive the layered teardown
+	// itself (LIFO with Parallel groups), but that would make Run and Stop two
+	// separate teardown implementations, free to drift apart. Stop stays the only
+	// one.
+	m.sh.Add("modules", m.Stop)
 
-			m.logger.InfoContext(ctx, "shutdown signal received, stopping modules")
-
-			return m.Stop(ctx)
-		})
-
-	return sd.WaitContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	return m.describeTimeout(m.sh.Wait(ctx))
 }
 
-// slogShutdownLogger adapts a *slog.Logger to the shutdown.Logger interface so
-// the orchestrator can report the shutdown sequence through the same structured
-// logger used for the rest of the lifecycle.
+// beginRun claims the single-use shutdown sequence for this call.
+func (m *Manager) beginRun() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.ran {
+		return ErrAlreadyRun
+	}
+	m.ran = true
+
+	return nil
+}
+
+// describeTimeout names the modules that were still running when the shutdown
+// budget ran out. go-shutdown can only report the hook it was given — "modules"
+// — which says nothing useful; Stop puts whatever it did not tear down back into
+// m.started, so the detail is available here.
+func (m *Manager) describeTimeout(err error) error {
+	if err == nil || !errors.Is(err, ErrShutdownTimeout) {
+		return err
+	}
+
+	m.mu.Lock()
+	remaining := slices.Clone(m.started)
+	m.mu.Unlock()
+
+	if len(remaining) == 0 {
+		return err
+	}
+
+	return fmt.Errorf("%w (modules still running: %s)", err, strings.Join(remaining, ", "))
+}
+
+// Shutdown triggers the shutdown sequence a [Manager.Run] is waiting on, as if a
+// signal had arrived. It is non-blocking and safe to call more than once, from
+// any goroutine.
+func (m *Manager) Shutdown() { m.sh.End() }
+
+// ExitCode reports the process exit code matching how the shutdown was
+// triggered: 128+signum when a signal did it — what a shell reports for a
+// process killed by that signal — and 0 otherwise.
 //
-// It carries a context, which a struct normally should not. The shutdown.Logger
-// methods take only variadic args, so there is nowhere else to thread one, and
-// the alternative — logging without a context — drops whatever the caller
-// attached to it for the rest of the lifecycle. The value is created inside
-// [Manager.Run] and lives exactly as long as that call, so it cannot outlive the
-// context it holds.
-type slogShutdownLogger struct {
-	l   *slog.Logger
-	ctx context.Context
-}
-
-func (s slogShutdownLogger) Trace(args ...any) {
-	s.l.DebugContext(s.ctx, fmt.Sprint(args...))
-}
-
-func (s slogShutdownLogger) Info(args ...any) {
-	s.l.InfoContext(s.ctx, fmt.Sprint(args...))
-}
+// Cleanup errors are deliberately not taken into account; whether a failed
+// teardown should change the exit status is the application's decision.
+//
+//	if err := mgr.Run(ctx); err != nil {
+//		logger.Error("shutdown failed", "error", err)
+//	}
+//	os.Exit(mgr.ExitCode())
+func (m *Manager) ExitCode() int { return m.sh.ExitCode() }
 
 // Health probes every started module that implements [HealthChecker] and joins
 // the errors of the unhealthy ones. It returns nil when all probed modules are
@@ -527,6 +594,14 @@ func (m *Manager) Health(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// startedNames returns the names of the modules currently considered started.
+func (m *Manager) startedNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return slices.Clone(m.started)
 }
 
 // Modules returns the names of all registered modules, sorted lexicographically.

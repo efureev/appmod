@@ -9,6 +9,11 @@
 //     UserCreated event and cache, which subscribed to it during its start,
 //     reacts by invalidating its entry.
 //
+// The worker module additionally shows shutdown observation: it watches
+// m.AppContext().Done() and stops taking new work the moment the shutdown
+// starts, rather than waiting for its own Destroy — which only runs after every
+// module depending on it has already stopped.
+//
 // The Manager injects a single shared appmod.AppContext (EventBus + Registry +
 // Logger) into every module that embeds appmod.BaseAppModule, so a module can
 // reach them through m.AppContext().
@@ -17,6 +22,7 @@
 //
 //	config        (no deps)
 //	  ├── db      (depends on config)        -> Provide[DB]
+//	  ├── worker  (depends on config)        -> watches AppContext().Done()
 //	  └── cache   (depends on config, db)    -> Require[DB], Provide[Cache], Subscribe[UserCreated]
 //	        api   (depends on db and cache)  -> Require[Cache]+[DB], Publish[UserCreated]
 //
@@ -33,7 +39,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/efureev/appmod/v2"
+	"github.com/efureev/appmod/v3"
 )
 
 // --- Contracts shared between modules ---------------------------------------
@@ -159,6 +165,53 @@ func (m *cacheModule) Get(ctx context.Context, key string) (string, bool) {
 	return "", false
 }
 
+// --- worker module: observes the shutdown without blocking -------------------
+
+type workerModule struct {
+	appmod.BaseAppModule
+	done chan struct{}
+}
+
+func newWorker() *workerModule {
+	m := &workerModule{done: make(chan struct{})}
+	m.SetConfig(appmod.NewConfig("worker", "v1"))
+
+	m.AfterStart(func(_ context.Context, _ appmod.HookModule) error {
+		ticker := time.NewTicker(60 * time.Millisecond)
+
+		go func() {
+			defer close(m.done)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-m.AppContext().Done():
+					// The shutdown has begun. Stop taking new work now instead of
+					// waiting for Destroy, which runs only after the modules that
+					// depend on this one have stopped.
+					fmt.Println("  worker: shutdown observed -> no new work")
+
+					return
+				case <-ticker.C:
+					fmt.Println("  worker: processing a job")
+				}
+			}
+		}()
+
+		return nil
+	})
+
+	// Destroy waits for the loop to finish draining.
+	m.BeforeDestroy(func(_ context.Context, _ appmod.HookModule) error {
+		<-m.done
+		fmt.Println("  worker: drained")
+
+		return nil
+	})
+
+	return m
+}
+
 // --- api module: requires Cache and DB, publishes UserCreated ----------------
 
 type apiModule struct {
@@ -206,6 +259,7 @@ func main() {
 
 	must(mgr.Register("config", appmod.New(appmod.WithConfig(appmod.NewConfig("config", "v1")))))
 	must(mgr.Register("db", newDB(), "config"))
+	must(mgr.Register("worker", newWorker(), "config"))
 	must(mgr.Register("cache", newCache(), "config", "db"))
 	must(mgr.Register("api", newAPI(), "db", "cache"))
 
@@ -221,9 +275,13 @@ func main() {
 	fmt.Println("-- starting application --")
 	if err := mgr.Run(ctx); err != nil {
 		fmt.Println("run error:", err)
-		os.Exit(1)
+	} else {
+		fmt.Println("-- application stopped cleanly --")
 	}
-	fmt.Println("-- application stopped cleanly --")
+
+	// ExitCode reports 128+signum when a signal triggered the shutdown, and 0
+	// otherwise, so a supervisor can tell a forced stop from a clean one.
+	os.Exit(mgr.ExitCode())
 }
 
 func must(err error) {
