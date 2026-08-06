@@ -44,6 +44,8 @@ func ExampleBaseAppModule() {
 // ExampleBaseAppModule_abort shows how returning an error from a BeforeStart
 // hook aborts initialization.
 func ExampleBaseAppModule_abort() {
+	// No SetConfig call: an unconfigured module reports the DefaultConfig name,
+	// which is why the error below is attributed to "App Module".
 	mod := &BaseAppModule{}
 
 	mod.BeforeStart(func(_ context.Context, _ HookModule) error {
@@ -52,12 +54,12 @@ func ExampleBaseAppModule_abort() {
 
 	if err := mod.Init(context.Background()); err != nil {
 		fmt.Println("init failed:", err)
-		fmt.Println("initialized:", mod.Initialized())
+		fmt.Println("running:", mod.State() == StateRunning)
 	}
 
 	// Output:
-	// init failed: appmod: BeforeStart hook #0 failed: config is invalid
-	// initialized: false
+	// init failed: appmod: module "App Module": BeforeStart hook #0 failed: config is invalid
+	// running: false
 }
 
 // ExampleManager demonstrates orchestrating several modules connected by

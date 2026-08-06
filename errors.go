@@ -45,6 +45,10 @@ var (
 	// ErrBusClosed is returned by [Subscribe] and [Publish] after the bus has
 	// been closed.
 	ErrBusClosed = errors.New("appmod: event bus is closed")
+	// ErrNoAppContext is returned by [SubscribeModule] when the module has not
+	// been given an [AppContext] yet. A [Manager] injects it before starting its
+	// modules, so subscribe from a start hook rather than from a constructor.
+	ErrNoAppContext = errors.New("appmod: module has no app context")
 )
 
 // Registry errors returned by [Registry], [Provide] and [Require].

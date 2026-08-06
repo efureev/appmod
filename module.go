@@ -11,6 +11,11 @@ import "context"
 // or mutate the hook set while it is running.
 type HookFunc func(ctx context.Context, mod HookModule) error
 
+// CleanupFunc releases something a module acquired while starting. Cleanups are
+// registered with [BaseAppModule.AddCleanup] and run when the module is torn
+// down, in reverse registration order.
+type CleanupFunc func(ctx context.Context) error
+
 // Named exposes the module name.
 type Named interface {
 	// Name returns the module name (a shortcut for Config().Name()).

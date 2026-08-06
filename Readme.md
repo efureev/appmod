@@ -25,13 +25,14 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - Idempotency guard: double `Init` or `Destroy` before `Init` returns a sentinel error.
 - Explicit lifecycle **state machine** (`Created → Initializing → Running → Destroying → Destroyed`, plus `Failed`) exposed via `State()`.
 - **Context-aware** lifecycle: hooks are skipped once the context is canceled.
-- **Atomic `Init`**: any start-hook failure (or context cancellation) triggers an automatic rollback (teardown hooks run in reverse order) and leaves the module in `StateFailed`.
+- **Atomic `Init`**: any start-hook failure (or context cancellation) triggers an automatic rollback (the `AddCleanup` compensations are unwound in reverse) and leaves the module in `StateFailed`.
 - Embeddable `BaseAppModule` — implement your own module by embedding it.
 - **Concurrency-safe**: lifecycle, hook registration and config access are mutex-guarded.
 - **Panic-safe hooks**: a panic in a hook is recovered and returned as an error.
 - Narrow capability interfaces (`Configurable` / `Named` / `Stateful` / `Lifecycle` / `HookRegistry`) composed into `AppModule`.
 - `New(opts ...Option)` constructor with functional options.
-- **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, reverse-order stop, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
+- **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, layered reverse-order stop that is likewise concurrent within a layer, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
+- **Lifecycle-scoped compensations** (`AddCleanup`, `SubscribeModule`): the release is registered next to the acquisition and runs on `Destroy` and on rollback.
 
 ## Requirements
 
@@ -119,21 +120,41 @@ deliberate: publishing `StateRunning` before the module has finished starting
 would let a concurrent `Destroy` pass its state guard and tear the module down
 mid-startup, running the teardown hooks twice.
 
-`Init` is **atomic**: if any start hook (`BeforeStart` or `AfterStart`) returns
-an error, or the context is canceled, the module automatically rolls back by
-running the teardown hooks (`BeforeDestroy`, then `AfterDestroy`) in reverse
-order and ends up in `StateFailed`. Rollback errors are joined with
-the original cause via `errors.Join`. The module is therefore never left
-half-started: `Init` either fully succeeds (`StateRunning`) or fails
-(`StateFailed`).
+Teardown hooks always observe `StateDestroying`, whether they were reached
+through `Destroy` or through `Init`'s rollback, so a hook may branch on
+`State()` without caring how it was invoked.
 
-> **Teardown hooks must be nil-safe and idempotent.** Rollback is unconditional:
-> the package pairs no start hook with a specific teardown hook, so it cannot
-> know which compensations are warranted. Every teardown hook runs, even when the
-> very first `BeforeStart` hook failed and nothing was acquired — so a hook that
-> blindly calls `pool.Close()` will dereference a nil pool. Skipping teardown is
-> not an option either: it would leak whatever the start hooks that *did* run had
-> acquired. Guard your teardown hooks accordingly.
+The zero value is genuinely ready to use: `Config()` reports `DefaultConfig()`
+until `SetConfig` is called, and `Name()` follows it exactly, so
+`m.Config().Name()` inside a hook is always safe. An unconfigured module is
+therefore named `App Module`.
+
+`Init` is **atomic**: if any start hook (`BeforeStart` or `AfterStart`) returns
+an error, or the context is canceled, the module automatically rolls back and
+ends up in `StateFailed`. Rollback errors are joined with the original cause via
+`errors.Join`. The module is therefore never left half-started: `Init` either
+fully succeeds (`StateRunning`) or fails (`StateFailed`).
+
+The rollback unwinds the cleanups registered with `AddCleanup`, in reverse
+order — **not** the teardown hooks. Teardown hooks describe how to stop a module
+that *finished* starting; running them after a half-finished start would close a
+pool that was never opened. Register the release next to the acquisition and a
+hook that never ran leaves nothing to undo:
+
+```go
+mod.BeforeStart(func(ctx context.Context, m appmod.HookModule) error {
+    pool, err := openPool()
+    if err != nil {
+        return err
+    }
+    mod.AddCleanup(func(context.Context) error { return pool.Close() })
+
+    return nil
+})
+```
+
+Cleanups also run on a normal `Destroy`, between the `BeforeDestroy` and
+`AfterDestroy` phases.
 
 ### Constructors
 
@@ -164,6 +185,12 @@ mod.RemoveHook(appmod.PhaseBeforeStart, "open-db")
 A failing hook is returned as a `*HookError` carrying the phase, index, hook
 name and module name; it unwraps to the original error so `errors.Is` /
 `errors.As` keep working.
+
+`AddHook`, `RemoveHook` and `WithHook` **panic** if the phase is not one of the
+four defined values. An out-of-range `Phase` is a programmer error, and the
+alternative — dropping the hook silently — turns start-up logic into code that
+never runs, with nothing to notice. Check a phase from configuration or a wire
+format with `Phase.Valid()` first.
 
 ### Per-module logging
 
@@ -282,6 +309,13 @@ returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
 if the graph has a cycle. A failed `Start` rolls back the modules that already
 started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
 
+Teardown mirrors startup: `Stop` reuses the same dependency layers, walks them in
+reverse and tears down each layer **concurrently**, so shutdown costs the maximum
+teardown per layer rather than the sum over all modules — which is what used to
+overrun a `WithShutdownTimeout` budget on an application of mostly independent
+modules. Ordering between layers is unchanged: a module is always stopped before
+the modules it depends on.
+
 `Start` is **not re-entrant**: calling it on a manager that is already starting
 or running returns `ErrAlreadyStarted` and leaves the running modules untouched.
 The guard is what makes a stray or concurrent second `Start` harmless — without
@@ -331,6 +365,12 @@ cause is a constructor that returned `(nil, err)` whose error went unchecked.
 Reporting it at `Provide` keeps the mistake where it is made: `Require` itself
 never panics, it returns an error.
 
+One asymmetry to know about: `Provide` and `Require` report a nil registry as
+`ErrNilRegistry`, but `Revoke` returns a plain `bool` and reports `false` both
+for a nil registry and for a contract that was never provided. The two cases are
+not distinguishable through its return value; check the registry for nil
+yourself if it matters.
+
 **EventBus — push (fire-and-forget).** A module *subscribes* to a value type and
 any module *publishes* values of that type. Delivery is synchronous, type-safe,
 panic-safe and joins subscriber errors via `errors.Join`.
@@ -340,6 +380,25 @@ interface variable (an `any`, an `error`, a domain interface), the event is
 delivered by its **dynamic** type as well as by the static one, so passing an
 event along through a wrapper does not silently drop it. Subscribers registered
 for an interface type keep working, and no subscriber is ever called twice.
+
+From inside a module, prefer `SubscribeModule`: it ties the subscription to the
+module's lifecycle and removes it on `Destroy`. Plain `Subscribe` hands back an
+`Unsubscribe` you must store and call yourself — forget it and a module that is
+stopped and started again is subscribed twice, so every event is delivered twice,
+growing by one delivery per restart. It is the `EventBus` counterpart of
+`Revoke`.
+
+```go
+// inside a start hook of a module embedding appmod.BaseAppModule:
+err := appmod.SubscribeModule(&m.BaseAppModule, func(ctx context.Context, e UserCreated) error {
+    // invalidate, react, ...
+    return nil
+})
+```
+
+For anything else that must be released when the module goes down, register it
+next to where it was acquired with `AddCleanup`; cleanups run in reverse
+registration order on `Destroy` and on a failed `Init`'s rollback.
 
 ```go
 type UserCreated struct{ ID string }

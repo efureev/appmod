@@ -91,6 +91,47 @@ func Subscribe[T any](b *EventBus, fn func(ctx context.Context, ev T) error) (Un
 	return func() { once.Do(func() { b.unsubscribe(t, id) }) }, nil
 }
 
+// SubscribeModule registers fn as a handler for events of type T on the bus the
+// module received through its [AppContext], and ties the subscription to the
+// module's lifecycle: it is removed automatically when the module is destroyed,
+// or when a failed [BaseAppModule.Init] rolls back.
+//
+// Prefer it to plain [Subscribe] from inside a module. Subscribe hands back an
+// [Unsubscribe] that the caller has to store somewhere and remember to invoke;
+// when that does not happen the handler outlives the module, so a module that is
+// stopped and started again is subscribed twice and every event is delivered
+// twice — growing by one delivery per restart, while the old handler keeps a
+// live reference to the destroyed module.
+//
+// It is the [EventBus] counterpart of [Revoke], which does the same job for a
+// [Registry] contract.
+//
+// It returns [ErrNilModule] if m is nil and [ErrNoAppContext] if no [AppContext]
+// has been injected yet. A [Manager] injects it before starting its modules, so
+// call this from a start hook rather than from a constructor.
+func SubscribeModule[T any](m *BaseAppModule, fn func(ctx context.Context, ev T) error) error {
+	if m == nil {
+		return ErrNilModule
+	}
+
+	appCtx := m.AppContext()
+	if appCtx == nil {
+		return ErrNoAppContext
+	}
+
+	unsub, err := Subscribe(appCtx.Bus, fn)
+	if err != nil {
+		return err
+	}
+
+	m.AddCleanup(func(context.Context) error {
+		unsub()
+		return nil
+	})
+
+	return nil
+}
+
 // unsubscribe removes the subscriber with the given id from the type bucket.
 func (b *EventBus) unsubscribe(t reflect.Type, id uint64) {
 	b.mu.Lock()
@@ -99,7 +140,15 @@ func (b *EventBus) unsubscribe(t reflect.Type, id uint64) {
 	subs := b.subs[t]
 	for i, s := range subs {
 		if s.id == id {
-			b.subs[t] = slices.Delete(subs, i, i+1)
+			subs = slices.Delete(subs, i, i+1)
+			if len(subs) == 0 {
+				// Drop the bucket entirely; otherwise the map only ever grows,
+				// keeping an empty slice per event type ever subscribed to.
+				delete(b.subs, t)
+			} else {
+				b.subs[t] = subs
+			}
+
 			break
 		}
 	}
@@ -117,22 +166,22 @@ func (b *EventBus) unsubscribe(t reflect.Type, id uint64) {
 // through an any, an error or a domain interface on its way here — the event is
 // delivered by its dynamic type as well as by T. Keying by T alone would look up
 // the interface bucket, deliver to nobody and still return nil, losing the event
-// without a trace; see [publishKeys].
+// without a trace.
 func Publish[T any](ctx context.Context, b *EventBus, ev T) error {
 	if b == nil {
 		return ErrNilBus
 	}
 
-	keys := publishKeys(ev)
+	primary, secondary := publishKeys(ev)
 
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
 		return ErrBusClosed
 	}
-	var subs []subscriber
-	for _, t := range keys {
-		subs = append(subs, b.subs[t]...)
+	subs := slices.Clone(b.subs[primary])
+	if secondary != nil {
+		subs = append(subs, b.subs[secondary]...)
 	}
 	b.mu.RUnlock()
 
@@ -150,31 +199,34 @@ func Publish[T any](ctx context.Context, b *EventBus, ev T) error {
 	return errors.Join(errs...)
 }
 
-// publishKeys returns the type keys an event must be delivered under.
+// publishKeys returns the type keys an event must be delivered under: primary
+// always, secondary only when non-nil.
 //
 // Events are keyed by their Go type, and for a concrete T that is exactly T.
 // But reflect reports the *static* type of the parameter, so the moment a value
 // reaches [Publish] through an interface variable T is inferred as that
 // interface: `var ev any = UserCreated{}` keys the event as `any`, not as
-// UserCreated. The dynamic type is therefore used as well, and it comes first so
-// that concrete subscribers — the common case — are served before any
-// interface-typed ones.
+// UserCreated. The dynamic type is therefore used as well, and it is the primary
+// key so that concrete subscribers — the common case — are served first.
 //
 // Subscribers registered for the interface itself keep working: a subscriber
 // belongs to exactly one key, so nothing is delivered twice.
-func publishKeys[T any](ev T) []reflect.Type {
+//
+// Two return values rather than a slice: Publish is the hot path, and the common
+// case must not allocate just to carry a single key.
+func publishKeys[T any](ev T) (primary, secondary reflect.Type) {
 	t := reflect.TypeFor[T]()
 	if t.Kind() != reflect.Interface {
-		return []reflect.Type{t}
+		return t, nil
 	}
 
 	dyn := reflect.TypeOf(ev)
 	if dyn == nil {
 		// A nil interface carries no dynamic type; only T can be keyed.
-		return []reflect.Type{t}
+		return t, nil
 	}
 
-	return []reflect.Type{dyn, t}
+	return dyn, t
 }
 
 // deliver invokes a single subscriber, converting a panic into an error so a
@@ -191,12 +243,13 @@ func deliver(ctx context.Context, fn func(context.Context, any) error, ev any) (
 
 // Close removes all subscriptions and marks the bus closed. Subsequent
 // [Subscribe]/[Publish] calls return [ErrBusClosed]. Close is idempotent.
-func (b *EventBus) Close() error {
+//
+// It returns nothing: closing a bus cannot fail, and an error return that is
+// always nil only invites callers to write handling that never runs.
+func (b *EventBus) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.closed = true
 	clear(b.subs)
-
-	return nil
 }

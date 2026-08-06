@@ -58,10 +58,10 @@ func main() {
 	if err := mod.Init(ctx); err != nil {
 		log.Fatalf("init failed: %v", err)
 	}
-	fmt.Println("state after init:", mod.State(), "| initialized:", mod.Initialized())
+	fmt.Println("state after init:", mod.State(), "| running:", mod.State() == appmod.StateRunning)
 
 	if err := mod.Destroy(ctx); err != nil {
 		log.Fatalf("destroy failed: %v", err)
 	}
-	fmt.Println("state after destroy:", mod.State(), "| initialized:", mod.Initialized())
+	fmt.Println("state after destroy:", mod.State(), "| running:", mod.State() == appmod.StateRunning)
 }

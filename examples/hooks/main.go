@@ -6,9 +6,9 @@
 //   - register named, prioritized hooks via AddHook and control their order;
 //   - remove a previously registered hook with RemoveHook;
 //   - inspect a failure through the typed *appmod.HookError (phase/index/name);
-//   - rely on automatic rollback: when a start hook fails, the teardown hooks
-//     of the hooks that already ran are executed in reverse and the module
-//     ends up in StateFailed.
+//   - rely on automatic rollback: when a start hook fails, the cleanups
+//     registered by the start hooks that already succeeded are unwound in
+//     reverse and the module ends up in StateFailed.
 //
 // Run it with:
 //
@@ -65,7 +65,8 @@ func main() {
 	removed := mod.RemoveHook(appmod.PhaseBeforeStart, "temporary")
 	fmt.Println("temporary hook removed:", removed)
 
-	// A matching teardown hook so rollback has something to compensate.
+	// A teardown hook: this runs on Destroy, i.e. when a started module is being
+	// stopped. Rollback of a failed start uses AddCleanup instead — see below.
 	mod.BeforeDestroy(func(_ context.Context, m appmod.HookModule) error {
 		fmt.Printf("  -> closing connection pool for %s\n", m.Name())
 		return nil
@@ -85,8 +86,8 @@ func main() {
 
 // failingHookError builds a module whose AfterStart hook fails and shows how the
 // returned error can be inspected programmatically via *appmod.HookError, and
-// how the automatic rollback runs the teardown hook of the already-started
-// BeforeStart hook.
+// how the automatic rollback unwinds the cleanup registered by the BeforeStart
+// hook that had already succeeded.
 func failingHookError() {
 	fmt.Println("\n== failing init with rollback ==")
 
@@ -95,14 +96,19 @@ func failingHookError() {
 	mod := appmod.New(appmod.WithConfig(appmod.NewConfig("flaky", "v0.1.0")))
 	mod.BeforeStart(func(_ context.Context, _ appmod.HookModule) error {
 		fmt.Println("  -> acquired resource")
+		// The release is registered right next to the acquisition. That is what
+		// the rollback unwinds: a hook that never ran registers nothing, so
+		// nothing is released on its behalf. Teardown hooks are not invoked on a
+		// failed start — they describe stopping a module that finished starting.
+		mod.AddCleanup(func(_ context.Context) error {
+			fmt.Println("  -> rollback released the acquired resource")
+			return nil
+		})
+
 		return nil
 	})
 	mod.AfterStart(func(_ context.Context, _ appmod.HookModule) error {
 		return errBoom
-	})
-	mod.BeforeDestroy(func(_ context.Context, _ appmod.HookModule) error {
-		fmt.Println("  -> rollback released the acquired resource")
-		return nil
 	})
 
 	err := mod.Init(context.Background())

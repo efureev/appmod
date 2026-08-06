@@ -19,6 +19,20 @@ const (
 	PhaseAfterDestroy
 )
 
+// Valid reports whether p is one of the four defined lifecycle phases.
+//
+// [BaseAppModule.AddHook] and [BaseAppModule.RemoveHook] panic on an invalid
+// phase, so use Valid to check a phase that comes from configuration, a wire
+// format or any other untrusted source before passing it on.
+func (p Phase) Valid() bool {
+	switch p {
+	case PhaseBeforeStart, PhaseAfterStart, PhaseBeforeDestroy, PhaseAfterDestroy:
+		return true
+	default:
+		return false
+	}
+}
+
 // String implements [fmt.Stringer].
 func (p Phase) String() string {
 	switch p {

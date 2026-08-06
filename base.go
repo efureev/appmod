@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// discardLogger is the shared no-op logger used by modules without one. It is a
+// package-level value because log() is called several times per lifecycle and
+// building a fresh slog.Logger each time is pure waste.
+var discardLogger = slog.New(slog.DiscardHandler)
+
 // BaseAppModule is an abstract, embeddable base implementation of [AppModule].
 //
 // The zero value is ready to use and safe for concurrent use by multiple
@@ -27,7 +32,66 @@ type BaseAppModule struct {
 	beforeDestroyHooks []Hook
 	afterDestroyHooks  []Hook
 
+	// cleanups are the compensations registered while the module was starting;
+	// they are consumed (and cleared) by the teardown.
+	cleanups []CleanupFunc
+
 	state State
+}
+
+// AddCleanup registers fn to run when the module is torn down: after the
+// BeforeDestroy hooks during [BaseAppModule.Destroy], and during the rollback of
+// a failed [BaseAppModule.Init]. Cleanups run in reverse registration order
+// (LIFO) and are cleared as they run, so each executes at most once and a module
+// that is initialized again starts with an empty list.
+//
+// It exists because the natural place to release something is next to where it
+// was acquired, not in a separate teardown hook wired up by hand. The canonical
+// case is an [EventBus] subscription, whose Unsubscribe would otherwise have
+// nowhere to live — see [SubscribeModule], which is built on this.
+//
+// A cleanup that panics is recovered and reported as an error, like a hook. A
+// nil fn is ignored.
+func (b *BaseAppModule) AddCleanup(fn CleanupFunc) {
+	if fn == nil {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.cleanups = append(b.cleanups, fn)
+}
+
+// runCleanups executes and clears the registered cleanups in reverse
+// registration order, collecting every error rather than stopping at the first
+// so that no compensation is skipped.
+func (b *BaseAppModule) runCleanups(ctx context.Context) []error {
+	b.mu.Lock()
+	cleanups := b.cleanups
+	b.cleanups = nil
+	b.mu.Unlock()
+
+	var errs []error
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		if err := b.runCleanup(ctx, cleanups[i]); err != nil {
+			errs = append(errs, fmt.Errorf("appmod: module %q: cleanup #%d failed: %w", b.Name(), i, err))
+		}
+	}
+
+	return errs
+}
+
+// runCleanup invokes a single cleanup, converting a panic into an error so a
+// misbehaving cleanup cannot crash the teardown.
+func (b *BaseAppModule) runCleanup(ctx context.Context, fn CleanupFunc) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("cleanup panicked: %v", r)
+		}
+	}()
+
+	return fn(ctx)
 }
 
 // State returns the current lifecycle state of the module.
@@ -39,9 +103,18 @@ func (b *BaseAppModule) State() State {
 }
 
 // Config returns the app module config.
+//
+// A module that has never been configured — including the zero value, which the
+// type documents as ready to use — reports [DefaultConfig] rather than nil.
+// Returning nil made the package's own idiom, Config().Name() inside a hook,
+// a nil dereference.
 func (b *BaseAppModule) Config() AppModuleConfig {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.config == nil {
+		return DefaultConfig()
+	}
 
 	return b.config
 }
@@ -54,14 +127,15 @@ func (b *BaseAppModule) SetConfig(config AppModuleConfig) {
 	b.config = config
 }
 
-// Name returns the module name (a shortcut for Config().Name()). It returns an
-// empty string when no configuration has been set.
+// Name returns the module name. It is a shortcut for Config().Name() and follows
+// it exactly, so an unconfigured module reports the [DefaultConfig] name rather
+// than an empty string.
 func (b *BaseAppModule) Name() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.config == nil {
-		return ""
+		return DefaultConfig().Name()
 	}
 
 	return b.config.Name()
@@ -102,19 +176,10 @@ func (b *BaseAppModule) log() *slog.Logger {
 	b.mu.Unlock()
 
 	if logger == nil {
-		return slog.New(slog.DiscardHandler)
+		return discardLogger
 	}
 
 	return logger
-}
-
-// Initialized reports whether the module is currently running (its Init
-// completed successfully and Destroy has not run yet).
-func (b *BaseAppModule) Initialized() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.state == StateRunning
 }
 
 // Init initializes the app module.
@@ -135,12 +200,18 @@ func (b *BaseAppModule) Initialized() bool {
 // canceled context aborts the remaining hooks.
 //
 // Failure semantics are atomic: if any start hook (BeforeStart or AfterStart)
-// fails or the context is canceled, Init automatically rolls back by running
-// the teardown hooks (see [BaseAppModule.rollback]) and leaves the module in
-// [StateFailed]. The module is therefore never left half-started: Init either
-// fully succeeds ([StateRunning]) or fails ([StateFailed]). Any rollback error
-// is joined with the original cause via [errors.Join]. A failing hook is
+// fails or the context is canceled, Init automatically rolls back and leaves the
+// module in [StateFailed]. The module is therefore never left half-started: Init
+// either fully succeeds ([StateRunning]) or fails ([StateFailed]). Any rollback
+// error is joined with the original cause via [errors.Join]. A failing hook is
 // reported as a [HookError].
+//
+// The rollback unwinds the cleanups registered with [BaseAppModule.AddCleanup],
+// not the teardown hooks: teardown hooks describe how to stop a module that
+// finished starting, and running them after a half-finished start would undo
+// work that never happened. A start hook that acquires something must therefore
+// register its release with AddCleanup for that release to happen on a failed
+// start.
 func (b *BaseAppModule) Init(ctx context.Context) error {
 	b.mu.Lock()
 	switch b.state {
@@ -184,6 +255,12 @@ func (b *BaseAppModule) Init(ctx context.Context) error {
 // failInit performs the rollback for a failed Init, marks the module as
 // [StateFailed] and returns the (possibly joined) error.
 func (b *BaseAppModule) failInit(ctx context.Context, cause error) error {
+	// Teardown hooks must observe the same state no matter which path reached
+	// them. Leaving the module in StateInitializing here meant a hook that
+	// branches on m.State() behaved one way under Destroy and another under
+	// rollback — and "Initializing" is a plainly wrong answer for cleanup code.
+	b.setState(StateDestroying)
+
 	if rbErr := b.rollback(ctx); rbErr != nil {
 		cause = errors.Join(cause, rbErr)
 	}
@@ -192,35 +269,25 @@ func (b *BaseAppModule) failInit(ctx context.Context, cause error) error {
 	return cause
 }
 
-// rollback compensates a failed Init by running the teardown hooks
-// (BeforeDestroy then AfterDestroy) in reverse order, so that resources
-// acquired by the start hooks that already ran are released.
+// rollback compensates a failed Init by unwinding the cleanups registered with
+// [BaseAppModule.AddCleanup], in reverse registration order.
 //
-// Rollback is unconditional: every teardown hook runs, no matter how far the
-// start phase got. The package pairs no start hook with a specific teardown
-// hook, so it cannot know which compensations are warranted — even a module
-// whose very first BeforeStart hook failed, and which therefore acquired
-// nothing, has its full teardown executed.
+// It runs exactly the compensations for the work that actually happened: a start
+// hook registers its cleanup after it succeeds, so a hook that never ran, or ran
+// and failed, has nothing registered and nothing is undone on its behalf.
 //
-// That is a deliberate contract, not an oversight: skipping teardown would leak
-// whatever the start hooks that did run had acquired. The cost is pushed onto
-// the hooks instead — teardown hooks MUST be nil-safe and idempotent, because
-// they can be invoked against resources that were never acquired.
+// The teardown hooks are deliberately NOT run here. They describe how to stop a
+// module that finished starting, which is a different job: invoking them after a
+// half-finished start meant closing a pool that was never opened or a listener
+// that was never bound, and the package could not tell the difference because it
+// pairs no start hook with a specific teardown hook. Compensation has to be
+// registered by the code that did the work — hence AddCleanup.
 //
 // Unlike the start phases, rollback does not abort on context cancellation: it
-// always attempts every teardown hook and joins all resulting errors so that no
-// cleanup is skipped.
+// always attempts every cleanup and joins all resulting errors so that nothing
+// is skipped.
 func (b *BaseAppModule) rollback(ctx context.Context) error {
-	b.mu.Lock()
-	beforeDestroy := slices.Clone(b.beforeDestroyHooks)
-	afterDestroy := slices.Clone(b.afterDestroyHooks)
-	b.mu.Unlock()
-
-	var errs []error
-	errs = append(errs, b.runTeardown(ctx, PhaseBeforeDestroy, beforeDestroy)...)
-	errs = append(errs, b.runTeardown(ctx, PhaseAfterDestroy, afterDestroy)...)
-
-	return errors.Join(errs...)
+	return errors.Join(b.runCleanups(ctx)...)
 }
 
 // Destroy tears down the app module.
@@ -233,6 +300,11 @@ func (b *BaseAppModule) rollback(ctx context.Context) error {
 // If a BeforeDestroy hook fails (or the context is canceled before the module
 // is marked destroyed), the error is returned as a [HookError] and the module
 // stays in [StateRunning] so that Destroy can be retried.
+//
+// Any cleanups registered with [BaseAppModule.AddCleanup] run between the two
+// hook phases — after BeforeDestroy has had its say, before the module is marked
+// destroyed — in reverse registration order. Their errors are joined with
+// whatever the AfterDestroy phase reports.
 func (b *BaseAppModule) Destroy(ctx context.Context) error {
 	b.mu.Lock()
 	if b.state != StateRunning {
@@ -253,6 +325,11 @@ func (b *BaseAppModule) Destroy(ctx context.Context) error {
 		return err
 	}
 
+	errs := b.runCleanups(ctx)
+	for _, err := range errs {
+		logger.ErrorContext(ctx, "module cleanup failed", "module", b.Name(), "error", err)
+	}
+
 	b.mu.Lock()
 	b.state = StateDestroyed
 	afterDestroy := slices.Clone(b.afterDestroyHooks)
@@ -260,7 +337,11 @@ func (b *BaseAppModule) Destroy(ctx context.Context) error {
 
 	if err := b.runPhase(ctx, PhaseAfterDestroy, afterDestroy); err != nil {
 		logger.ErrorContext(ctx, "module destroy failed", "module", b.Name(), "phase", PhaseAfterDestroy.String(), "error", err)
-		return err
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	logger.InfoContext(ctx, "module destroyed", "module", b.Name(), "duration", time.Since(start))
@@ -295,27 +376,6 @@ func (b *BaseAppModule) runPhase(ctx context.Context, phase Phase, hooks []Hook)
 	}
 
 	return nil
-}
-
-// runTeardown executes the given teardown hooks in reverse priority order,
-// collecting every error instead of stopping at the first one. It is used by
-// [BaseAppModule.rollback] and intentionally ignores context cancellation so
-// that cleanup always runs to completion.
-func (b *BaseAppModule) runTeardown(ctx context.Context, phase Phase, hooks []Hook) []error {
-	ordered := orderHooks(hooks)
-
-	var errs []error
-	for i := len(ordered) - 1; i >= 0; i-- {
-		h := ordered[i]
-		if h.Run == nil {
-			continue
-		}
-		if err := b.runHook(ctx, h.Run); err != nil {
-			errs = append(errs, &HookError{Phase: phase, Index: i, Name: h.Name, Module: b.Name(), Err: err})
-		}
-	}
-
-	return errs
 }
 
 // runHook invokes a single hook, converting a panic into an error so that a
@@ -390,18 +450,37 @@ func (b *BaseAppModule) AfterDestroy(fn HookFunc) {
 // AddHook registers a named, prioritized hook for the given phase. Within a
 // phase, hooks run in ascending priority order; hooks of equal priority keep
 // their registration order.
+//
+// It panics if phase is not one of the four defined phases. An out-of-range
+// phase is a programmer error, and dropping the hook silently — the previous
+// behavior — turned it into start-up logic that simply never ran, with nothing
+// anywhere to notice. Check untrusted values with [Phase.Valid] first.
 func (b *BaseAppModule) AddHook(phase Phase, hook Hook) {
+	mustValidPhase("AddHook", phase)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if slice := b.hooksFor(phase); slice != nil {
-		*slice = append(*slice, hook)
+	slice := b.hooksFor(phase)
+	*slice = append(*slice, hook)
+}
+
+// mustValidPhase panics unless phase is one of the four defined phases. The
+// caller name is included so the panic points at the offending API.
+func mustValidPhase(op string, phase Phase) {
+	if !phase.Valid() {
+		panic(fmt.Sprintf("appmod: %s: invalid phase %s", op, phase))
 	}
 }
 
 // RemoveHook removes the named hook from the given phase and reports whether a
 // hook was removed. Anonymous hooks (empty name) are never removed.
+//
+// Like [BaseAppModule.AddHook] it panics on a phase that is not one of the four
+// defined ones: a false return must mean "no such hook", never "no such phase".
 func (b *BaseAppModule) RemoveHook(phase Phase, name string) bool {
+	mustValidPhase("RemoveHook", phase)
+
 	if name == "" {
 		return false
 	}
@@ -410,26 +489,18 @@ func (b *BaseAppModule) RemoveHook(phase Phase, name string) bool {
 	defer b.mu.Unlock()
 
 	slice := b.hooksFor(phase)
-	if slice == nil {
-		return false
-	}
 
-	kept := (*slice)[:0]
-	removed := false
-	for _, h := range *slice {
-		if h.Name == name {
-			removed = true
-			continue
-		}
-		kept = append(kept, h)
-	}
-	*slice = kept
+	// slices.DeleteFunc zeroes the freed tail, so the removed hooks (and whatever
+	// their closures captured) become unreachable. Compacting by hand with
+	// (*slice)[:0] left those references live in the backing array.
+	before := len(*slice)
+	*slice = slices.DeleteFunc(*slice, func(h Hook) bool { return h.Name == name })
 
-	return removed
+	return len(*slice) != before
 }
 
-// hooksFor returns a pointer to the hook slice for the given phase, or nil for
-// an unknown phase. The caller must hold mu.
+// hooksFor returns a pointer to the hook slice for the given phase. The caller
+// must hold mu, and must have validated the phase with mustValidPhase.
 func (b *BaseAppModule) hooksFor(phase Phase) *[]Hook {
 	switch phase {
 	case PhaseBeforeStart:
@@ -441,6 +512,10 @@ func (b *BaseAppModule) hooksFor(phase Phase) *[]Hook {
 	case PhaseAfterDestroy:
 		return &b.afterDestroyHooks
 	default:
-		return nil
+		// Unreachable: every caller validates the phase first. Panicking rather
+		// than returning nil means a phase added later without wiring it up here
+		// fails loudly instead of silently dropping hooks — the very bug the
+		// validation was introduced to kill.
+		panic(fmt.Sprintf("appmod: unreachable: hooksFor(%s)", phase))
 	}
 }

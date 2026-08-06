@@ -68,11 +68,11 @@ func TestRegistryRevoke(t *testing.T) {
 	reg := NewRegistry()
 	_ = Provide[greeter](reg, enGreeter{})
 
-	if !Revoke[greeter](reg) {
-		t.Error("Revoke() = false, want true")
+	if removed, err := Revoke[greeter](reg); err != nil || !removed {
+		t.Errorf("Revoke() = (%v, %v), want (true, nil)", removed, err)
 	}
-	if Revoke[greeter](reg) {
-		t.Error("second Revoke() = true, want false")
+	if removed, err := Revoke[greeter](reg); err != nil || removed {
+		t.Errorf("second Revoke() = (%v, %v), want (false, nil)", removed, err)
 	}
 	if _, err := Require[greeter](reg); !errors.Is(err, ErrProviderNotFound) {
 		t.Errorf("Require() after Revoke = %v, want ErrProviderNotFound", err)
@@ -91,8 +91,8 @@ func TestRegistryNil(t *testing.T) {
 	if _, err := Require[greeter](nil); !errors.Is(err, ErrNilRegistry) {
 		t.Errorf("Require(nil) = %v, want ErrNilRegistry", err)
 	}
-	if Revoke[greeter](nil) {
-		t.Error("Revoke(nil) = true, want false")
+	if removed, err := Revoke[greeter](nil); !errors.Is(err, ErrNilRegistry) || removed {
+		t.Errorf("Revoke(nil) = (%v, %v), want (false, %v)", removed, err, ErrNilRegistry)
 	}
 }
 
@@ -202,4 +202,24 @@ func TestRegistryProvideNil(t *testing.T) {
 			t.Errorf("Require() = %v, want %v", err, ErrProviderNotFound)
 		}
 	})
+}
+
+// TestRegistryNilIsUniform pins the rule that every registry entry point reports
+// a nil registry the same way. Revoke used to return a bare false, which made a
+// wiring mistake indistinguishable from the perfectly normal "nothing to remove".
+func TestRegistryNilIsUniform(t *testing.T) {
+	if err := Provide[greeter](nil, enGreeter{}); !errors.Is(err, ErrNilRegistry) {
+		t.Errorf("Provide(nil) = %v, want %v", err, ErrNilRegistry)
+	}
+	if _, err := Require[greeter](nil); !errors.Is(err, ErrNilRegistry) {
+		t.Errorf("Require(nil) = %v, want %v", err, ErrNilRegistry)
+	}
+	if _, err := Revoke[greeter](nil); !errors.Is(err, ErrNilRegistry) {
+		t.Errorf("Revoke(nil) = %v, want %v", err, ErrNilRegistry)
+	}
+
+	// A present-but-empty registry is not an error: nothing was removed.
+	if removed, err := Revoke[greeter](NewRegistry()); err != nil || removed {
+		t.Errorf("Revoke(empty) = (%v, %v), want (false, nil)", removed, err)
+	}
 }

@@ -69,8 +69,11 @@ func newDB() *dbModule {
 		return appmod.Provide[DB](m.AppContext().Registry, m)
 	})
 	m.BeforeDestroy(func(_ context.Context, _ appmod.HookModule) error {
-		appmod.Revoke[DB](m.AppContext().Registry)
-		return nil
+		// Revoke reports whether anything was removed, plus an error for a nil
+		// registry — a wiring mistake worth surfacing rather than swallowing.
+		_, err := appmod.Revoke[DB](m.AppContext().Registry)
+
+		return err
 	})
 
 	return m
@@ -113,7 +116,10 @@ func newCache() *cacheModule {
 		}
 
 		// push: react to UserCreated events published anywhere in the app.
-		if _, err := appmod.Subscribe(ac.Bus, func(_ context.Context, e UserCreated) error {
+		// SubscribeModule ties the subscription to this module's lifecycle, so it
+		// is removed on Destroy; plain Subscribe would leave the handler on the
+		// bus and a restarted module would receive every event twice.
+		if err := appmod.SubscribeModule(&m.BaseAppModule, func(_ context.Context, e UserCreated) error {
 			fmt.Printf("  cache: UserCreated(%s) received -> invalidating entry\n", e.ID)
 			m.mu.Lock()
 			delete(m.store, e.ID)

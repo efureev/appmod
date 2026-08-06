@@ -115,9 +115,13 @@ func isNilImpl[T any](impl T) bool {
 // Revoke removes the implementation previously registered for contract T and
 // reports whether one was removed. It is typically called by a provider in its
 // BeforeDestroy hook so a restart does not leave a stale implementation behind.
-func Revoke[T any](r *Registry) bool {
+//
+// It returns [ErrNilRegistry] if r is nil, matching [Provide] and [Require]: a
+// nil registry is a wiring mistake, and reporting it as "nothing was removed"
+// would hide it behind an outcome that is also perfectly normal.
+func Revoke[T any](r *Registry) (bool, error) {
 	if r == nil {
-		return false
+		return false, ErrNilRegistry
 	}
 
 	t := reflect.TypeFor[T]()
@@ -126,9 +130,9 @@ func Revoke[T any](r *Registry) bool {
 	defer r.mu.Unlock()
 
 	if _, ok := r.services[t]; !ok {
-		return false
+		return false, nil
 	}
 	delete(r.services, t)
 
-	return true
+	return true, nil
 }

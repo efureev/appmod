@@ -3,6 +3,8 @@ package appmod
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,8 +74,8 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		if err := mod.Init(t.Context()); err != nil {
 			t.Errorf("Init() = %v, want nil", err)
 		}
-		if !mod.Initialized() {
-			t.Error("Initialized() = false, want true after Init")
+		if got := mod.State(); got != StateRunning {
+			t.Errorf("State() = %v, want %v after Init", got, StateRunning)
 		}
 	})
 
@@ -102,8 +104,8 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		if err := mod.Destroy(t.Context()); err != nil {
 			t.Errorf("Destroy() = %v, want nil", err)
 		}
-		if mod.Initialized() {
-			t.Error("Initialized() = true, want false after Destroy")
+		if got := mod.State(); got == StateRunning {
+			t.Error("State() = Running, want anything else after Destroy")
 		}
 	})
 
@@ -203,8 +205,8 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 			t.Errorf("Init() = %v, want %v", err, error1)
 		}
 		// BeforeStart failed, so the module stays not initialized.
-		if mod.Initialized() {
-			t.Error("Initialized() = true, want false after failed Init")
+		if got := mod.State(); got == StateRunning {
+			t.Error("State() = Running, want anything else after failed Init")
 		}
 
 		// Force the module into the running state to exercise Destroy hook.
@@ -224,8 +226,8 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 		if err == nil {
 			t.Fatal("Init() = nil, want error after panicking hook")
 		}
-		if mod.Initialized() {
-			t.Error("Initialized() = true, want false after panicking hook")
+		if got := mod.State(); got == StateRunning {
+			t.Error("State() = Running, want anything else after panicking hook")
 		}
 	})
 
@@ -260,7 +262,7 @@ func TestAppModuleBaseAppMod(t *testing.T) {
 				defer wg.Done()
 				mod.BeforeStart(func(_ context.Context, _ HookModule) error { return nil })
 				_ = mod.Init(t.Context())
-				_ = mod.Initialized()
+				_ = mod.State()
 				mod.SetConfig(NewConfig("c", "v"))
 				_ = mod.Destroy(t.Context())
 			}()
@@ -315,20 +317,31 @@ func TestAppModuleLifecycleState(t *testing.T) {
 }
 
 func TestAppModuleInitRollback(t *testing.T) {
-	t.Run("BeforeStartFailureRunsTeardownReversed", func(t *testing.T) {
+	t.Run("UnwindsCleanupsNotTeardownHooks", func(t *testing.T) {
 		mod := &BaseAppModule{}
 
 		var order []string
+		// Two start hooks acquire something and register its release; the third
+		// fails, so only the first two compensations are owed.
+		for _, name := range []string{"one", "two"} {
+			mod.BeforeStart(func(_ context.Context, _ HookModule) error {
+				order = append(order, "acquire:"+name)
+				mod.AddCleanup(func(_ context.Context) error {
+					order = append(order, "release:"+name)
+					return nil
+				})
+
+				return nil
+			})
+		}
 		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
-			order = append(order, "beforeStart")
+			order = append(order, "boom")
 			return errors.New("boom")
 		})
+		// Teardown hooks describe stopping a started module; a failed start must
+		// not invoke them, or they would undo work that never happened.
 		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
-			order = append(order, "beforeDestroy1")
-			return nil
-		})
-		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
-			order = append(order, "beforeDestroy2")
+			order = append(order, "beforeDestroy")
 			return nil
 		})
 		mod.AfterDestroy(func(_ context.Context, _ HookModule) error {
@@ -343,42 +356,36 @@ func TestAppModuleInitRollback(t *testing.T) {
 			t.Errorf("State() = %v, want %v", got, StateFailed)
 		}
 
-		// Teardown runs in reverse registration order: BeforeDestroy hooks
-		// (reversed) then AfterDestroy hooks (reversed).
-		want := []string{"beforeStart", "beforeDestroy2", "beforeDestroy1", "afterDestroy"}
-		if len(order) != len(want) {
-			t.Fatalf("order = %v, want %v", order, want)
-		}
-		for i := range want {
-			if order[i] != want[i] {
-				t.Fatalf("order = %v, want %v", order, want)
-			}
+		want := []string{"acquire:one", "acquire:two", "boom", "release:two", "release:one"}
+		if !slices.Equal(order, want) {
+			t.Errorf("order = %v, want %v", order, want)
 		}
 	})
 
 	t.Run("AfterStartFailureRollsBack", func(t *testing.T) {
 		mod := &BaseAppModule{}
 
-		var torndown bool
+		var released bool
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
+			mod.AddCleanup(func(_ context.Context) error {
+				released = true
+				return nil
+			})
+
+			return nil
+		})
 		mod.AfterStart(func(_ context.Context, _ HookModule) error {
 			return errors.New("after start boom")
-		})
-		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
-			torndown = true
-			return nil
 		})
 
 		if err := mod.Init(t.Context()); err == nil {
 			t.Fatal("Init() = nil, want error")
 		}
-		if mod.Initialized() {
-			t.Error("Initialized() = true, want false after AfterStart failure")
-		}
 		if got := mod.State(); got != StateFailed {
 			t.Errorf("State() = %v, want %v", got, StateFailed)
 		}
-		if !torndown {
-			t.Error("teardown hook was not run during rollback")
+		if !released {
+			t.Error("cleanup registered by BeforeStart was not run during rollback")
 		}
 	})
 
@@ -386,12 +393,13 @@ func TestAppModuleInitRollback(t *testing.T) {
 		mod := &BaseAppModule{}
 
 		startErr := errors.New("start boom")
-		rollbackErr := errors.New("teardown boom")
+		rollbackErr := errors.New("cleanup boom")
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
+			mod.AddCleanup(func(_ context.Context) error { return rollbackErr })
+			return nil
+		})
 		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
 			return startErr
-		})
-		mod.BeforeDestroy(func(_ context.Context, _ HookModule) error {
-			return rollbackErr
 		})
 
 		err := mod.Init(t.Context())
@@ -485,19 +493,21 @@ func TestAppModuleAfterStartWindow(t *testing.T) {
 			entered   = make(chan struct{})
 			release   = make(chan struct{})
 		)
-		mod := New(
-			WithConfig(NewConfig("m", "v1")),
-			WithAfterStart(func(_ context.Context, _ HookModule) error {
-				close(entered)
-				<-release
-
-				return errors.New("afterstart failed")
-			}),
-			WithBeforeDestroy(func(_ context.Context, _ HookModule) error {
+		mod := New(WithConfig(NewConfig("m", "v1")))
+		mod.BeforeStart(func(_ context.Context, _ HookModule) error {
+			mod.AddCleanup(func(_ context.Context) error {
 				teardowns.Add(1)
 				return nil
-			}),
-		)
+			})
+
+			return nil
+		})
+		mod.AfterStart(func(_ context.Context, _ HookModule) error {
+			close(entered)
+			<-release
+
+			return errors.New("afterstart failed")
+		})
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -514,10 +524,264 @@ func TestAppModuleAfterStartWindow(t *testing.T) {
 		wg.Wait()
 
 		if got := teardowns.Load(); got != 1 {
-			t.Errorf("BeforeDestroy ran %d time(s), want exactly 1 (rollback only)", got)
+			t.Errorf("compensation ran %d time(s), want exactly 1 (rollback only)", got)
 		}
 		if got := mod.State(); got != StateFailed {
 			t.Errorf("State() = %v, want %v", got, StateFailed)
 		}
 	})
+}
+
+// TestTeardownStateIsConsistent covers the state a teardown hook observes. It
+// used to differ by path: StateInitializing when reached through Init's
+// rollback, StateDestroying when reached through Destroy, so a hook branching on
+// m.State() behaved differently depending on how it was called.
+func TestTeardownStateIsConsistent(t *testing.T) {
+	newMod := func(seen *State) AppModule {
+		return New(
+			WithConfig(NewConfig("m", "v1")),
+			WithBeforeDestroy(func(_ context.Context, m HookModule) error {
+				*seen = m.State()
+				return nil
+			}),
+		)
+	}
+
+	var viaRollback State
+	rollbackMod := New(WithConfig(NewConfig("m", "v1")))
+	rollbackMod.BeforeStart(func(_ context.Context, _ HookModule) error {
+		rollbackMod.AddCleanup(func(_ context.Context) error {
+			viaRollback = rollbackMod.State()
+			return nil
+		})
+
+		return nil
+	})
+	rollbackMod.AfterStart(func(_ context.Context, _ HookModule) error {
+		return errors.New("boom")
+	})
+	_ = rollbackMod.Init(t.Context())
+
+	var viaDestroy State
+	ok := newMod(&viaDestroy)
+	if err := ok.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+	if err := ok.Destroy(t.Context()); err != nil {
+		t.Fatalf("Destroy() = %v, want nil", err)
+	}
+
+	if viaRollback != StateDestroying {
+		t.Errorf("state during rollback = %v, want %v", viaRollback, StateDestroying)
+	}
+	if viaRollback != viaDestroy {
+		t.Errorf("teardown sees %v via rollback but %v via Destroy; want the same", viaRollback, viaDestroy)
+	}
+}
+
+// TestZeroValueModuleHasDefaultConfig covers the "zero value is ready to use"
+// claim: Config() used to return nil, so the package's own idiom
+// Config().Name() inside a hook was a nil dereference.
+func TestZeroValueModuleHasDefaultConfig(t *testing.T) {
+	mod := &BaseAppModule{}
+
+	if got := mod.Config(); got == nil {
+		t.Fatal("Config() = nil, want DefaultConfig()")
+	}
+	if got, want := mod.Config().Name(), DefaultConfig().Name(); got != want {
+		t.Errorf("Config().Name() = %q, want %q", got, want)
+	}
+	if got, want := mod.Name(), mod.Config().Name(); got != want {
+		t.Errorf("Name() = %q, but Config().Name() = %q; they must agree", got, want)
+	}
+
+	// The idiom that used to panic must now work end to end.
+	var seen string
+	mod.BeforeStart(func(_ context.Context, m HookModule) error {
+		seen = m.Config().Name()
+		return nil
+	})
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+	if seen != DefaultConfig().Name() {
+		t.Errorf("hook saw Config().Name() = %q, want %q", seen, DefaultConfig().Name())
+	}
+}
+
+// TestAddCleanup covers the cleanup registry backing SubscribeModule: LIFO
+// order, execution on both teardown paths, and single execution.
+func TestAddCleanup(t *testing.T) {
+	t.Run("RunsLIFOOnDestroy", func(t *testing.T) {
+		var order []string
+		mod := New(WithConfig(NewConfig("m", "v1")))
+		for _, name := range []string{"first", "second", "third"} {
+			mod.AddCleanup(func(_ context.Context) error {
+				order = append(order, name)
+				return nil
+			})
+		}
+
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		if err := mod.Destroy(t.Context()); err != nil {
+			t.Fatalf("Destroy() = %v, want nil", err)
+		}
+
+		want := []string{"third", "second", "first"}
+		if !slices.Equal(order, want) {
+			t.Errorf("cleanup order = %v, want %v", order, want)
+		}
+	})
+
+	t.Run("RunsOnRollback", func(t *testing.T) {
+		var ran int
+		mod := New(
+			WithConfig(NewConfig("m", "v1")),
+			WithAfterStart(func(_ context.Context, _ HookModule) error {
+				return errors.New("boom")
+			}),
+		)
+		mod.AddCleanup(func(_ context.Context) error {
+			ran++
+			return nil
+		})
+
+		if err := mod.Init(t.Context()); err == nil {
+			t.Fatal("Init() = nil, want error")
+		}
+		if ran != 1 {
+			t.Errorf("cleanup ran %d time(s) during rollback, want 1", ran)
+		}
+	})
+
+	t.Run("RunsAtMostOnce", func(t *testing.T) {
+		var ran int
+		mod := New(WithConfig(NewConfig("m", "v1")))
+		mod.AddCleanup(func(_ context.Context) error {
+			ran++
+			return nil
+		})
+
+		for range 2 {
+			if err := mod.Init(t.Context()); err != nil {
+				t.Fatalf("Init() = %v, want nil", err)
+			}
+			if err := mod.Destroy(t.Context()); err != nil {
+				t.Fatalf("Destroy() = %v, want nil", err)
+			}
+		}
+		if ran != 1 {
+			t.Errorf("cleanup ran %d time(s) across two lifecycles, want 1", ran)
+		}
+	})
+
+	t.Run("ErrorsAndPanicsAreReported", func(t *testing.T) {
+		sentinel := errors.New("cleanup boom")
+		mod := New(WithConfig(NewConfig("m", "v1")))
+		mod.AddCleanup(func(_ context.Context) error { return sentinel })
+		mod.AddCleanup(func(_ context.Context) error { panic("nope") })
+
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		err := mod.Destroy(t.Context())
+		if !errors.Is(err, sentinel) {
+			t.Errorf("Destroy() = %v, want to wrap %v", err, sentinel)
+		}
+		if err == nil || !strings.Contains(err.Error(), "cleanup panicked") {
+			t.Errorf("Destroy() = %v, want it to report the panicking cleanup", err)
+		}
+		if got := mod.State(); got != StateDestroyed {
+			t.Errorf("State() = %v, want %v", got, StateDestroyed)
+		}
+	})
+
+	t.Run("NilIgnored", func(t *testing.T) {
+		mod := New(WithConfig(NewConfig("m", "v1")))
+		mod.AddCleanup(nil)
+
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		if err := mod.Destroy(t.Context()); err != nil {
+			t.Errorf("Destroy() = %v, want nil", err)
+		}
+	})
+}
+
+// TestWithAfterDestroy covers the one functional option with no test of its own,
+// and pins the order of the two teardown phases.
+func TestWithAfterDestroy(t *testing.T) {
+	var order []string
+	mod := New(
+		WithConfig(NewConfig("m", "v1")),
+		WithBeforeDestroy(func(_ context.Context, _ HookModule) error {
+			order = append(order, "before")
+			return nil
+		}),
+		WithAfterDestroy(func(_ context.Context, m HookModule) error {
+			order = append(order, "after:"+m.State().String())
+			return nil
+		}),
+	)
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+	if err := mod.Destroy(t.Context()); err != nil {
+		t.Fatalf("Destroy() = %v, want nil", err)
+	}
+
+	want := []string{"before", "after:Destroyed"}
+	if !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+}
+
+// TestDestroyAfterDestroyFailure covers the second teardown phase failing: the
+// module is already marked destroyed by then, so the error is reported without
+// resurrecting it.
+func TestDestroyAfterDestroyFailure(t *testing.T) {
+	boom := errors.New("after destroy boom")
+	mod := New(
+		WithConfig(NewConfig("m", "v1")),
+		WithAfterDestroy(func(_ context.Context, _ HookModule) error { return boom }),
+	)
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+
+	err := mod.Destroy(t.Context())
+	if !errors.Is(err, boom) {
+		t.Errorf("Destroy() = %v, want to wrap %v", err, boom)
+	}
+	// The module passed the point of no return before AfterDestroy ran, so it
+	// stays destroyed rather than reverting to Running.
+	if got := mod.State(); got != StateDestroyed {
+		t.Errorf("State() = %v, want %v", got, StateDestroyed)
+	}
+}
+
+// TestHookWithNilRunIsSkipped covers a Hook registered without a Run function:
+// it is skipped rather than dereferenced.
+func TestHookWithNilRunIsSkipped(t *testing.T) {
+	var ran []string
+	mod := &BaseAppModule{}
+	mod.SetConfig(NewConfig("m", "v1"))
+
+	mod.AddHook(PhaseBeforeStart, Hook{Name: "placeholder", Priority: -1})
+	mod.AddHook(PhaseBeforeStart, Hook{Name: "real", Run: func(_ context.Context, _ HookModule) error {
+		ran = append(ran, "real")
+		return nil
+	}})
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+	if !slices.Equal(ran, []string{"real"}) {
+		t.Errorf("ran = %v, want [real]", ran)
+	}
 }

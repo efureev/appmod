@@ -214,3 +214,100 @@ func TestHookModuleIsOpaque(t *testing.T) {
 		t.Errorf("State() = %v, want %v", state, StateInitializing)
 	}
 }
+
+func TestPhaseValid(t *testing.T) {
+	for _, p := range []Phase{PhaseBeforeStart, PhaseAfterStart, PhaseBeforeDestroy, PhaseAfterDestroy} {
+		if !p.Valid() {
+			t.Errorf("Phase(%v).Valid() = false, want true", p)
+		}
+	}
+	for _, p := range []Phase{Phase(-1), Phase(4), Phase(42)} {
+		if p.Valid() {
+			t.Errorf("Phase(%d).Valid() = true, want false", int32(p))
+		}
+	}
+}
+
+// TestUnknownPhasePanics pins the fix for a silent failure: an out-of-range
+// phase used to make AddHook drop the hook without a word, turning start-up
+// logic into code that simply never ran.
+func TestUnknownPhasePanics(t *testing.T) {
+	cases := map[string]func(){
+		"AddHook": func() {
+			(&BaseAppModule{}).AddHook(Phase(42), Hook{Name: "ghost"})
+		},
+		"RemoveHook": func() {
+			(&BaseAppModule{}).RemoveHook(Phase(42), "ghost")
+		},
+		"WithHook": func() {
+			_ = New(WithHook(Phase(42), Hook{Name: "ghost"}))
+		},
+	}
+
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("%s(Phase(42)) did not panic", name)
+				}
+				if msg, ok := r.(string); !ok || !strings.Contains(msg, "invalid phase Phase(42)") {
+					t.Errorf("panic = %v, want a message naming the invalid phase", r)
+				}
+			}()
+			fn()
+		})
+	}
+}
+
+// TestValidPhaseDoesNotPanic guards against the check being too eager.
+func TestValidPhaseDoesNotPanic(t *testing.T) {
+	mod := &BaseAppModule{}
+	for _, p := range []Phase{PhaseBeforeStart, PhaseAfterStart, PhaseBeforeDestroy, PhaseAfterDestroy} {
+		mod.AddHook(p, Hook{Name: "h", Run: func(_ context.Context, _ HookModule) error { return nil }})
+		if !mod.RemoveHook(p, "h") {
+			t.Errorf("RemoveHook(%v) = false, want true", p)
+		}
+	}
+}
+
+// TestSetLogger covers the imperative counterpart of WithModuleLogger.
+func TestSetLogger(t *testing.T) {
+	var buf bytes.Buffer
+	mod := &BaseAppModule{}
+	mod.SetConfig(NewConfig("imperative", "v1"))
+	mod.SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+	if !strings.Contains(buf.String(), "module=imperative") {
+		t.Errorf("log output missing the module name: %q", buf.String())
+	}
+
+	// A nil logger disables logging without panicking.
+	mod.SetLogger(nil)
+	if err := mod.Destroy(t.Context()); err != nil {
+		t.Errorf("Destroy() after SetLogger(nil) = %v, want nil", err)
+	}
+}
+
+// TestHookErrorWithoutModule covers the branch of HookError.Error that omits the
+// module prefix. A module built by this package always has a name, so the branch
+// is only reachable for a HookError a caller constructed itself.
+func TestHookErrorWithoutModule(t *testing.T) {
+	cause := errors.New("boom")
+
+	anonymous := &HookError{Phase: PhaseAfterStart, Index: 2, Err: cause}
+	if got, want := anonymous.Error(), "appmod: AfterStart hook #2 failed: boom"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+
+	named := &HookError{Phase: PhaseBeforeDestroy, Index: 0, Name: "close-db", Err: cause}
+	if got, want := named.Error(), `appmod: BeforeDestroy hook "close-db" failed: boom`; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(named, cause) {
+		t.Error("HookError does not unwrap to its cause")
+	}
+}

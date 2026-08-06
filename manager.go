@@ -22,9 +22,9 @@ type HealthChecker interface {
 	HealthCheck(ctx context.Context) error
 }
 
-// node is a registered module together with its dependencies.
+// node is a registered module together with its dependencies. The name is the
+// map key, so it is not repeated here.
 type node struct {
-	name   string
 	module AppModule
 	deps   []string
 }
@@ -55,9 +55,9 @@ type healthProbe struct {
 //
 // Modules are registered with [Manager.Register] together with the names of the
 // modules they depend on. [Manager.Start] initializes them in dependency
-// (topological) order, starting independent modules concurrently, and
-// [Manager.Stop] tears them down in the reverse order. A dependency cycle is
-// reported as [ErrDependencyCycle].
+// (topological) order and [Manager.Stop] tears them down in the reverse one;
+// both run the modules of a layer concurrently. A dependency cycle is reported
+// as [ErrDependencyCycle].
 //
 // A Manager is safe for concurrent use by multiple goroutines.
 type Manager struct {
@@ -102,7 +102,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 		opt(m)
 	}
 	if m.logger == nil {
-		m.logger = slog.New(slog.DiscardHandler)
+		m.logger = discardLogger
 	}
 	m.appCtx = &AppContext{
 		Bus:      NewEventBus(),
@@ -139,7 +139,7 @@ func (m *Manager) Register(name string, module AppModule, deps ...string) error 
 	if _, ok := m.nodes[name]; ok {
 		return fmt.Errorf("%w: %q", ErrDuplicateModule, name)
 	}
-	m.nodes[name] = &node{name: name, module: module, deps: slices.Clone(deps)}
+	m.nodes[name] = &node{module: module, deps: slices.Clone(deps)}
 
 	return nil
 }
@@ -148,9 +148,10 @@ func (m *Manager) Register(name string, module AppModule, deps ...string) error 
 //
 // Independent modules within the same dependency layer are started
 // concurrently. If any module fails to start (or the context is canceled),
-// Start rolls back by stopping the modules that already started, in reverse
-// order, and returns the cause joined with any teardown error via
+// Start rolls back through [Manager.Stop] — reverse layer order, concurrent
+// within a layer — and returns the cause joined with any teardown error via
 // [errors.Join].
+//
 // Start is not re-entrant: calling it on a manager that is already starting or
 // running returns [ErrAlreadyStarted] without touching the running modules. The
 // guard is what makes a stray or concurrent second Start harmless — without it
@@ -291,6 +292,13 @@ func (m *Manager) abort(ctx context.Context, cause error) error {
 // detached goroutine. The names of the modules that were not torn down are
 // retained so a subsequent Stop can resume the teardown; until that teardown
 // completes, [Manager.Start] refuses to run with [ErrAlreadyStarted].
+//
+// Teardown mirrors startup: modules are grouped into the same dependency layers
+// [Manager.Start] uses, walked in reverse, and the modules within a layer are
+// stopped concurrently. A serial teardown made shutdown cost the sum of every
+// module's teardown instead of the maximum per layer, which is what blows a
+// [WithShutdownTimeout] budget on an application whose modules are mostly
+// independent.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	started := slices.Clone(m.started)
@@ -298,35 +306,131 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.state = managerStopped
 	m.mu.Unlock()
 
-	var errs []error
-	for i := len(started) - 1; i >= 0; i-- {
-		name := started[i]
+	if len(started) == 0 {
+		return nil
+	}
 
+	layers := m.stopLayers(started)
+
+	var errs []error
+	for i, layer := range layers {
 		if err := ctx.Err(); err != nil {
 			// Context canceled (e.g. shutdown timeout): stop iterating so the
 			// teardown does not leak as a detached goroutine. Put the modules
 			// that were not stopped back so a later Stop can finish the job.
-			m.logger.ErrorContext(ctx, "teardown aborted by context", "error", err, "remaining", i+1)
-			m.mu.Lock()
-			m.started = append(slices.Clone(started[:i+1]), m.started...)
-			m.mu.Unlock()
+			remaining := m.retain(layers[i:])
+			m.logger.ErrorContext(ctx, "teardown aborted by context", "error", err, "remaining", remaining)
 			errs = append(errs, fmt.Errorf("appmod: teardown aborted: %w", err))
 
 			return errors.Join(errs...)
 		}
 
+		errs = append(errs, m.stopLayer(ctx, layer)...)
+	}
+
+	return errors.Join(errs...)
+}
+
+// stopLayers groups started into teardown layers: the dependency layers used by
+// [Manager.Start], reversed, so that dependents are torn down before the modules
+// they depend on and everything within a layer is independent.
+//
+// If the graph is no longer plannable — a module registered after Start can
+// introduce a cycle or an unknown dependency — it falls back to the reverse of
+// the start order with one module per layer, which is always safe.
+func (m *Manager) stopLayers(started []string) [][]string {
+	reverseSerial := func() [][]string {
+		out := make([][]string, 0, len(started))
+		for i := len(started) - 1; i >= 0; i-- {
+			out = append(out, []string{started[i]})
+		}
+
+		return out
+	}
+
+	layers, err := m.plan()
+	if err != nil {
+		return reverseSerial()
+	}
+
+	pending := make(map[string]struct{}, len(started))
+	for _, name := range started {
+		pending[name] = struct{}{}
+	}
+
+	out := make([][]string, 0, len(layers))
+	for i := len(layers) - 1; i >= 0; i-- {
+		var layer []string
+		for _, name := range layers[i] {
+			if _, ok := pending[name]; ok {
+				layer = append(layer, name)
+				delete(pending, name)
+			}
+		}
+		if len(layer) > 0 {
+			out = append(out, layer)
+		}
+	}
+
+	// Defensive: anything started but missing from the plan is torn down last,
+	// one at a time, so no started module is silently left running.
+	for i := len(started) - 1; i >= 0; i-- {
+		if _, ok := pending[started[i]]; ok {
+			out = append(out, []string{started[i]})
+		}
+	}
+
+	return out
+}
+
+// stopLayer tears down every module of a layer concurrently and returns their
+// errors in layer order, so the joined result does not depend on scheduling.
+func (m *Manager) stopLayer(ctx context.Context, layer []string) []error {
+	var wg sync.WaitGroup
+
+	errs := make([]error, len(layer))
+	for i, name := range layer {
 		m.mu.Lock()
 		n := m.nodes[name]
 		m.mu.Unlock()
 
-		m.logger.InfoContext(ctx, "stopping module", "module", name)
-		if err := n.module.Destroy(ctx); err != nil {
-			m.logger.ErrorContext(ctx, "module failed to stop", "module", name, "error", err)
-			errs = append(errs, fmt.Errorf("appmod: module %q failed to stop: %w", name, err))
+		// Defensive: a started module always has a node, since Register only ever
+		// adds. Kept so that adding an Unregister later cannot turn this into a
+		// nil dereference.
+		if n == nil {
+			continue
 		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			m.logger.InfoContext(ctx, "stopping module", "module", name)
+			if err := n.module.Destroy(ctx); err != nil {
+				m.logger.ErrorContext(ctx, "module failed to stop", "module", name, "error", err)
+				errs[i] = fmt.Errorf("appmod: module %q failed to stop: %w", name, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	return slices.DeleteFunc(errs, func(err error) bool { return err == nil })
+}
+
+// retain puts the modules of the not-yet-processed teardown layers back into
+// m.started and reports how many. They are stored in start order — the reverse
+// of the teardown order — because that is what Stop expects to reverse again.
+func (m *Manager) retain(pending [][]string) int {
+	var names []string
+	for i := len(pending) - 1; i >= 0; i-- {
+		names = append(names, pending[i]...)
 	}
 
-	return errors.Join(errs...)
+	m.mu.Lock()
+	m.started = append(names, m.started...)
+	m.mu.Unlock()
+
+	return len(names)
 }
 
 // Run starts all modules and then blocks until the context is canceled or an
@@ -344,10 +448,23 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 
 	sd := shutdown.New().
-		SetLogger(slogShutdownLogger{m.logger}).
+		SetLogger(slogShutdownLogger{l: m.logger, ctx: ctx}).
 		SetTimeout(m.shutdownTimeout).
 		OnDestroy(func(ctx context.Context) error {
-			m.logger.Info("shutdown signal received, stopping modules")
+			// Without a shutdown timeout the shutdown package hands us the very
+			// context passed to Run — and its cancellation is usually what woke
+			// Run in the first place. Tearing down with it would make Stop abort
+			// before the first module and leave everything running, so detach.
+			//
+			// With a timeout configured the context is already detached and
+			// bounded by it, and Stop must honor that: expiring the budget is
+			// exactly what it is there for.
+			if m.shutdownTimeout <= 0 {
+				ctx = context.WithoutCancel(ctx)
+			}
+
+			m.logger.InfoContext(ctx, "shutdown signal received, stopping modules")
+
 			return m.Stop(ctx)
 		})
 
@@ -357,10 +474,25 @@ func (m *Manager) Run(ctx context.Context) error {
 // slogShutdownLogger adapts a *slog.Logger to the shutdown.Logger interface so
 // the orchestrator can report the shutdown sequence through the same structured
 // logger used for the rest of the lifecycle.
-type slogShutdownLogger struct{ l *slog.Logger }
+//
+// It carries a context, which a struct normally should not. The shutdown.Logger
+// methods take only variadic args, so there is nowhere else to thread one, and
+// the alternative — logging without a context — drops whatever the caller
+// attached to it for the rest of the lifecycle. The value is created inside
+// [Manager.Run] and lives exactly as long as that call, so it cannot outlive the
+// context it holds.
+type slogShutdownLogger struct {
+	l   *slog.Logger
+	ctx context.Context
+}
 
-func (s slogShutdownLogger) Trace(args ...any) { s.l.Debug(fmt.Sprint(args...)) }
-func (s slogShutdownLogger) Info(args ...any)  { s.l.Info(fmt.Sprint(args...)) }
+func (s slogShutdownLogger) Trace(args ...any) {
+	s.l.DebugContext(s.ctx, fmt.Sprint(args...))
+}
+
+func (s slogShutdownLogger) Info(args ...any) {
+	s.l.InfoContext(s.ctx, fmt.Sprint(args...))
+}
 
 // Health probes every started module that implements [HealthChecker] and joins
 // the errors of the unhealthy ones. It returns nil when all probed modules are
@@ -377,6 +509,8 @@ func (m *Manager) Health(ctx context.Context) error {
 	for _, name := range m.started {
 		n, ok := m.nodes[name]
 		if !ok {
+			// Defensive, as in stopLayer: unreachable while Register is the only
+			// way to populate the map.
 			continue
 		}
 		if hc, ok := n.module.(HealthChecker); ok {

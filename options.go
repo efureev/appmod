@@ -37,11 +37,15 @@ func WithAfterDestroy(fn HookFunc) Option {
 }
 
 // WithHook registers a named, prioritized hook for the given phase.
+//
+// Like [BaseAppModule.AddHook], applying this option panics if phase is not one
+// of the four defined phases.
 func WithHook(phase Phase, hook Hook) Option {
 	return func(b *BaseAppModule) {
-		if slice := b.hooksFor(phase); slice != nil {
-			*slice = append(*slice, hook)
-		}
+		mustValidPhase("WithHook", phase)
+
+		slice := b.hooksFor(phase)
+		*slice = append(*slice, hook)
 	}
 }
 
