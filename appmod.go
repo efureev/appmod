@@ -70,4 +70,5 @@ var (
 	_ AppModule       = (*BaseAppModule)(nil)
 	_ AppModuleConfig = Config{}
 	_ ContextAware    = (*BaseAppModule)(nil)
+	_ HookModule      = hookView{}
 )

@@ -27,6 +27,12 @@ var (
 	// ErrDependencyCycle is returned by [Manager.Start] when the dependency
 	// graph contains a cycle.
 	ErrDependencyCycle = errors.New("appmod: dependency cycle detected")
+	// ErrAlreadyStarted is returned by [Manager.Start] when the manager is
+	// already starting or running, or when a previous teardown did not finish.
+	// Starting twice is refused instead of attempted, because a second Start
+	// would fail on the already-initialized modules and then roll back — tearing
+	// down the modules the first Start had brought up.
+	ErrAlreadyStarted = errors.New("appmod: manager already started")
 )
 
 // EventBus errors returned by [EventBus], [Subscribe] and [Publish].
@@ -49,6 +55,9 @@ var (
 	// ErrDuplicateProvider is returned by [Provide] when a contract of the same
 	// type has already been provided.
 	ErrDuplicateProvider = errors.New("appmod: contract already provided")
+	// ErrNilImplementation is returned by [Provide] when the implementation is
+	// nil, which would otherwise only surface as a panic inside [Require].
+	ErrNilImplementation = errors.New("appmod: contract implementation must not be nil")
 	// ErrProviderNotFound is returned by [Require] when no provider has been
 	// registered for the requested contract.
 	ErrProviderNotFound = errors.New("appmod: contract provider not found")

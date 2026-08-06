@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -447,6 +448,76 @@ func TestAppModuleContext(t *testing.T) {
 		}
 		if second {
 			t.Error("second BeforeStart hook ran after context cancellation")
+		}
+	})
+}
+
+// TestAppModuleAfterStartWindow covers the window between the BeforeStart and
+// AfterStart phases. The module used to publish StateRunning before running the
+// AfterStart hooks, which let a concurrent Destroy pass its state guard and tear
+// the module down while Init was still starting it — running the teardown hooks
+// twice and racing the two final setState calls.
+func TestAppModuleAfterStartWindow(t *testing.T) {
+	t.Run("NotRunningUntilInitReturns", func(t *testing.T) {
+		var seen State
+		mod := New(
+			WithConfig(NewConfig("m", "v1")),
+			WithAfterStart(func(_ context.Context, m HookModule) error {
+				seen = m.State()
+				return nil
+			}),
+		)
+
+		if err := mod.Init(t.Context()); err != nil {
+			t.Fatalf("Init() = %v, want nil", err)
+		}
+		if seen != StateInitializing {
+			t.Errorf("state during AfterStart = %v, want %v", seen, StateInitializing)
+		}
+		if got := mod.State(); got != StateRunning {
+			t.Errorf("State() after Init = %v, want %v", got, StateRunning)
+		}
+	})
+
+	t.Run("ConcurrentDestroyDoesNotDoubleTeardown", func(t *testing.T) {
+		var (
+			teardowns atomic.Int32
+			entered   = make(chan struct{})
+			release   = make(chan struct{})
+		)
+		mod := New(
+			WithConfig(NewConfig("m", "v1")),
+			WithAfterStart(func(_ context.Context, _ HookModule) error {
+				close(entered)
+				<-release
+
+				return errors.New("afterstart failed")
+			}),
+			WithBeforeDestroy(func(_ context.Context, _ HookModule) error {
+				teardowns.Add(1)
+				return nil
+			}),
+		)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = mod.Init(context.Background())
+		}()
+
+		<-entered
+		if err := mod.Destroy(t.Context()); !errors.Is(err, ErrNotInitialized) {
+			t.Errorf("Destroy() while Init is running = %v, want %v", err, ErrNotInitialized)
+		}
+		close(release)
+		wg.Wait()
+
+		if got := teardowns.Load(); got != 1 {
+			t.Errorf("BeforeDestroy ran %d time(s), want exactly 1 (rollback only)", got)
+		}
+		if got := mod.State(); got != StateFailed {
+			t.Errorf("State() = %v, want %v", got, StateFailed)
 		}
 	})
 }

@@ -19,7 +19,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - Context-aware lifecycle: `Init(ctx)` / `Destroy(ctx)`.
 - Four sets of lifecycle hooks; multiple hooks can be registered per phase and run in order.
 - **Named, prioritized and removable hooks** (`Hook`, `AddHook` / `RemoveHook`): within a phase, hooks run in ascending priority order.
-- Hooks receive a narrow, read-only `HookModule` view (config/name/state) instead of the full module.
+- Hooks receive a narrow, read-only `HookModule` view (config/name/state) instead of the full module — an opaque value, so it cannot be asserted back to `Lifecycle` or `HookRegistry`.
 - Hooks can abort startup/shutdown by returning an `error`, reported as a typed `HookError` (phase, index, name, module).
 - Optional **per-module structured logging** (`slog`) of lifecycle transitions and phase durations.
 - Idempotency guard: double `Init` or `Destroy` before `Init` returns a sentinel error.
@@ -113,13 +113,27 @@ Calling `Init` while the module is running returns `ErrAlreadyInitialized`;
 calling `Destroy` on a module that is not running returns `ErrNotInitialized`.
 A destroyed (or failed) module can be initialized again.
 
+The module reaches `StateRunning` only once `Init` has completed **both** start
+phases, so an `AfterStart` hook still observes `StateInitializing`. This is
+deliberate: publishing `StateRunning` before the module has finished starting
+would let a concurrent `Destroy` pass its state guard and tear the module down
+mid-startup, running the teardown hooks twice.
+
 `Init` is **atomic**: if any start hook (`BeforeStart` or `AfterStart`) returns
 an error, or the context is canceled, the module automatically rolls back by
 running the teardown hooks (`BeforeDestroy`, then `AfterDestroy`) in reverse
-registration order and ends up in `StateFailed`. Rollback errors are joined with
+order and ends up in `StateFailed`. Rollback errors are joined with
 the original cause via `errors.Join`. The module is therefore never left
 half-started: `Init` either fully succeeds (`StateRunning`) or fails
 (`StateFailed`).
+
+> **Teardown hooks must be nil-safe and idempotent.** Rollback is unconditional:
+> the package pairs no start hook with a specific teardown hook, so it cannot
+> know which compensations are warranted. Every teardown hook runs, even when the
+> very first `BeforeStart` hook failed and nothing was acquired — so a hook that
+> blindly calls `pool.Close()` will dereference a nil pool. Skipping teardown is
+> not an option either: it would leak whatever the start hooks that *did* run had
+> acquired. Guard your teardown hooks accordingly.
 
 ### Constructors
 
@@ -268,6 +282,13 @@ returns `ErrUnknownDependency` for missing dependencies and `ErrDependencyCycle`
 if the graph has a cycle. A failed `Start` rolls back the modules that already
 started. Modules implementing `HealthChecker` can be probed via `mgr.Health(ctx)`.
 
+`Start` is **not re-entrant**: calling it on a manager that is already starting
+or running returns `ErrAlreadyStarted` and leaves the running modules untouched.
+The guard is what makes a stray or concurrent second `Start` harmless — without
+it the second call would fail on the already-initialized modules, treat that as
+a startup failure, and roll back, stopping the modules the first `Start` had
+successfully brought up. After `Stop` the manager can be started again.
+
 `Run` delegates its graceful-shutdown sequence (signal handling and the
 timeout-bounded teardown) to
 [`github.com/efureev/go-shutdown`](https://github.com/efureev/go-shutdown): it
@@ -305,9 +326,20 @@ _ = appmod.Provide[DB](m.AppContext().Registry, m) // m implements DB
 db, err := appmod.Require[DB](m.AppContext().Registry)
 ```
 
+`Provide` rejects a nil implementation with `ErrNilImplementation` — the usual
+cause is a constructor that returned `(nil, err)` whose error went unchecked.
+Reporting it at `Provide` keeps the mistake where it is made: `Require` itself
+never panics, it returns an error.
+
 **EventBus — push (fire-and-forget).** A module *subscribes* to a value type and
 any module *publishes* values of that type. Delivery is synchronous, type-safe,
 panic-safe and joins subscriber errors via `errors.Join`.
+
+Events are keyed by their Go type. When the value reaches `Publish` through an
+interface variable (an `any`, an `error`, a domain interface), the event is
+delivered by its **dynamic** type as well as by the static one, so passing an
+event along through a wrapper does not silently drop it. Subscribers registered
+for an interface type keep working, and no subscriber is ever called twice.
 
 ```go
 type UserCreated struct{ ID string }

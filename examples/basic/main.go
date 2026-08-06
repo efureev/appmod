@@ -30,14 +30,18 @@ func main() {
 
 	fmt.Println("state after creation:", mod.State()) // Created
 
-	// Hooks run in the order: BeforeStart → (Running) → AfterStart during Init,
+	// Hooks run in the order: BeforeStart → AfterStart → (Running) during Init,
 	// and BeforeDestroy → (Destroyed) → AfterDestroy during Destroy.
+	//
+	// Note the asymmetry: the module reaches Running only after Init has finished
+	// every start hook, so an AfterStart hook still observes Initializing. That is
+	// what keeps a concurrent Destroy from tearing down a half-started module.
 	mod.BeforeStart(func(_ context.Context, m appmod.HookModule) error {
 		fmt.Printf("[before-start] preparing %s %s\n", m.Config().Name(), m.Config().Version())
 		return nil
 	})
 	mod.AfterStart(func(_ context.Context, m appmod.HookModule) error {
-		fmt.Printf("[after-start] %s is now %s\n", m.Config().Name(), m.State())
+		fmt.Printf("[after-start] %s started (state is still %s until Init returns)\n", m.Config().Name(), m.State())
 		return nil
 	})
 	mod.BeforeDestroy(func(_ context.Context, m appmod.HookModule) error {

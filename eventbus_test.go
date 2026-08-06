@@ -173,3 +173,107 @@ func TestEventBusConcurrent(t *testing.T) {
 		t.Error("expected the persistent subscriber to be invoked at least once")
 	}
 }
+
+// namedEvent is an interface deliberately implemented by evtA, to cover
+// subscriptions keyed by an interface type.
+type namedEvent interface{ eventName() string }
+
+func (evtA) eventName() string { return "evtA" }
+
+// TestEventBusPublishThroughInterface covers events that reach Publish through
+// an interface variable. reflect reports the static type of the parameter, so
+// keying by T alone looked up the interface bucket, delivered to nobody and
+// still returned nil — losing the event without a trace.
+func TestEventBusPublishThroughInterface(t *testing.T) {
+	t.Run("DeliveredByDynamicType", func(t *testing.T) {
+		bus := NewEventBus()
+
+		var got atomic.Int32
+		if _, err := Subscribe(bus, func(_ context.Context, e evtA) error {
+			got.Add(int32(e.n))
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() = %v, want nil", err)
+		}
+
+		var ev any = evtA{n: 7}
+		if err := Publish(t.Context(), bus, ev); err != nil {
+			t.Fatalf("Publish() = %v, want nil", err)
+		}
+		if got.Load() != 7 {
+			t.Errorf("subscriber received %d, want 7 (event published through any was dropped)", got.Load())
+		}
+	})
+
+	t.Run("InterfaceSubscriberStillWorks", func(t *testing.T) {
+		bus := NewEventBus()
+
+		var iface, concrete atomic.Int32
+		if _, err := Subscribe(bus, func(_ context.Context, _ namedEvent) error {
+			iface.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() = %v, want nil", err)
+		}
+		if _, err := Subscribe(bus, func(_ context.Context, _ evtA) error {
+			concrete.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() = %v, want nil", err)
+		}
+
+		// Published as the interface: both the dynamic-type subscriber and the
+		// interface subscriber must fire, each exactly once.
+		var ev namedEvent = evtA{n: 1}
+		if err := Publish(t.Context(), bus, ev); err != nil {
+			t.Fatalf("Publish() = %v, want nil", err)
+		}
+		if iface.Load() != 1 {
+			t.Errorf("interface subscriber called %d time(s), want 1", iface.Load())
+		}
+		if concrete.Load() != 1 {
+			t.Errorf("concrete subscriber called %d time(s), want 1", concrete.Load())
+		}
+	})
+
+	t.Run("ConcreteTypeUnaffected", func(t *testing.T) {
+		bus := NewEventBus()
+
+		var got atomic.Int32
+		if _, err := Subscribe(bus, func(_ context.Context, _ evtB) error {
+			got.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() = %v, want nil", err)
+		}
+		if err := Publish(t.Context(), bus, evtB{}); err != nil {
+			t.Fatalf("Publish() = %v, want nil", err)
+		}
+		if err := Publish(t.Context(), bus, evtA{n: 1}); err != nil {
+			t.Fatalf("Publish() = %v, want nil", err)
+		}
+		if got.Load() != 1 {
+			t.Errorf("subscriber called %d time(s), want 1", got.Load())
+		}
+	})
+
+	t.Run("NilInterfaceEvent", func(t *testing.T) {
+		bus := NewEventBus()
+
+		var got atomic.Int32
+		if _, err := Subscribe(bus, func(_ context.Context, _ any) error {
+			got.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() = %v, want nil", err)
+		}
+
+		var ev any
+		if err := Publish(t.Context(), bus, ev); err != nil {
+			t.Fatalf("Publish(nil) = %v, want nil", err)
+		}
+		if got.Load() != 1 {
+			t.Errorf("any-subscriber called %d time(s), want 1", got.Load())
+		}
+	})
+}

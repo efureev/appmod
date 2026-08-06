@@ -35,11 +35,20 @@ func NewRegistry() *Registry {
 
 // Provide registers impl as the implementation of contract T.
 //
-// It returns [ErrNilRegistry] if r is nil and [ErrDuplicateProvider] if a
-// contract of type T has already been provided.
+// It returns [ErrNilRegistry] if r is nil, [ErrNilImplementation] if impl is a
+// nil interface, pointer, map, slice, function or channel, and
+// [ErrDuplicateProvider] if a contract of type T has already been provided.
+//
+// The nil check matters because a nil implementation is not detectable at the
+// point of use: it would be stored happily and only surface inside [Require].
+// Rejecting it here reports the mistake where it is made — usually a provider
+// whose constructor returned (nil, err) and whose error went unchecked.
 func Provide[T any](r *Registry, impl T) error {
 	if r == nil {
 		return ErrNilRegistry
+	}
+	if isNilImpl(impl) {
+		return fmt.Errorf("%w: %s", ErrNilImplementation, reflect.TypeFor[T]())
 	}
 
 	t := reflect.TypeFor[T]()
@@ -59,6 +68,10 @@ func Provide[T any](r *Registry, impl T) error {
 //
 // It returns the zero value of T together with [ErrNilRegistry] if r is nil and
 // [ErrProviderNotFound] if no provider has been registered for T.
+//
+// Require never panics: the stored value is recovered with a checked type
+// assertion, so even a registry populated through some other path cannot turn a
+// lookup into a runtime panic.
 func Require[T any](r *Registry) (T, error) {
 	var zero T
 	if r == nil {
@@ -75,7 +88,28 @@ func Require[T any](r *Registry) (T, error) {
 		return zero, fmt.Errorf("%w: %s", ErrProviderNotFound, t)
 	}
 
-	return v.(T), nil
+	impl, ok := v.(T)
+	if !ok {
+		return zero, fmt.Errorf("%w: %s is registered as %T", ErrProviderNotFound, t, v)
+	}
+
+	return impl, nil
+}
+
+// isNilImpl reports whether impl is a typed nil of a nilable kind. It inspects
+// the static type T (via a pointer to impl) rather than the dynamic type, so a
+// nil interface is detected as nil while a non-nilable kind (a struct, a string)
+// never is.
+func isNilImpl[T any](impl T) bool {
+	v := reflect.ValueOf(&impl).Elem()
+
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice,
+		reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // Revoke removes the implementation previously registered for contract T and

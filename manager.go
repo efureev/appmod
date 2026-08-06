@@ -29,6 +29,28 @@ type node struct {
 	deps   []string
 }
 
+// managerState is the lifecycle state of a [Manager]. It exists to make Start
+// non-reentrant; module lifecycle is tracked separately by [State].
+type managerState int32
+
+const (
+	// managerCreated is a manager that has never been started.
+	managerCreated managerState = iota
+	// managerStarting means Start is currently bringing modules up.
+	managerStarting
+	// managerRunning means Start completed successfully.
+	managerRunning
+	// managerStopped means Stop has run (or Start rolled itself back).
+	managerStopped
+)
+
+// healthProbe pairs a module name with its [HealthChecker] view, so [Manager.Health]
+// can collect everything it needs under the mutex and probe without holding it.
+type healthProbe struct {
+	name    string
+	checker HealthChecker
+}
+
 // Manager orchestrates a set of named [AppModule]s connected by dependencies.
 //
 // Modules are registered with [Manager.Register] together with the names of the
@@ -45,6 +67,9 @@ type Manager struct {
 	// started holds the names of successfully started modules in start
 	// completion order; Stop tears them down in reverse.
 	started []string
+
+	// state guards against a re-entrant Start; see [ErrAlreadyStarted].
+	state managerState
 
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
@@ -126,9 +151,22 @@ func (m *Manager) Register(name string, module AppModule, deps ...string) error 
 // Start rolls back by stopping the modules that already started, in reverse
 // order, and returns the cause joined with any teardown error via
 // [errors.Join].
+// Start is not re-entrant: calling it on a manager that is already starting or
+// running returns [ErrAlreadyStarted] without touching the running modules. The
+// guard is what makes a stray or concurrent second Start harmless — without it
+// the second call would fail on the already-initialized modules, treat that as a
+// startup failure and roll back, stopping the modules the first Start had
+// successfully brought up.
+//
+// After [Manager.Stop] the manager can be started again.
 func (m *Manager) Start(ctx context.Context) error {
+	if err := m.beginStart(); err != nil {
+		return err
+	}
+
 	layers, err := m.plan()
 	if err != nil {
+		m.setState(managerStopped)
 		return err
 	}
 
@@ -143,7 +181,37 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 
+	m.setState(managerRunning)
+
 	return nil
+}
+
+// beginStart claims the manager for a start attempt, or reports why it cannot be
+// claimed. It also refuses to start while modules from a previous run are still
+// up (a teardown aborted by its context leaves them in m.started).
+func (m *Manager) beginStart() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch m.state {
+	case managerCreated, managerStopped:
+	default:
+		return ErrAlreadyStarted
+	}
+	if len(m.started) > 0 {
+		return fmt.Errorf("%w: %d module(s) from a previous run are still started", ErrAlreadyStarted, len(m.started))
+	}
+	m.state = managerStarting
+
+	return nil
+}
+
+// setState atomically updates the manager lifecycle state.
+func (m *Manager) setState(s managerState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.state = s
 }
 
 // injectContext hands the shared [AppContext] to every registered module that
@@ -221,11 +289,13 @@ func (m *Manager) abort(ctx context.Context, cause error) error {
 // example, when [Manager.Run] hits its shutdown timeout), Stop aborts before
 // the next module instead of spinning forever, so it does not keep running in a
 // detached goroutine. The names of the modules that were not torn down are
-// retained so a subsequent Stop can resume the teardown.
+// retained so a subsequent Stop can resume the teardown; until that teardown
+// completes, [Manager.Start] refuses to run with [ErrAlreadyStarted].
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	started := slices.Clone(m.started)
 	m.started = nil
+	m.state = managerStopped
 	m.mu.Unlock()
 
 	var errs []error
@@ -295,20 +365,30 @@ func (s slogShutdownLogger) Info(args ...any)  { s.l.Info(fmt.Sprint(args...)) }
 // Health probes every started module that implements [HealthChecker] and joins
 // the errors of the unhealthy ones. It returns nil when all probed modules are
 // healthy (or none implement [HealthChecker]).
+// The probes are collected under the mutex and executed without it: a
+// HealthCheck is user code and may block, so it must not be run while holding
+// the lock. Note that it is the probes that are copied out, not the node map —
+// reading m.nodes after unlocking would race with a concurrent
+// [Manager.Register] and crash the process with "concurrent map read and map
+// write", which no recover can catch.
 func (m *Manager) Health(ctx context.Context) error {
 	m.mu.Lock()
-	started := slices.Clone(m.started)
-	nodes := m.nodes
-	m.mu.Unlock()
-
-	var errs []error
-	for _, name := range started {
-		hc, ok := nodes[name].module.(HealthChecker)
+	probes := make([]healthProbe, 0, len(m.started))
+	for _, name := range m.started {
+		n, ok := m.nodes[name]
 		if !ok {
 			continue
 		}
-		if err := hc.HealthCheck(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("appmod: module %q is unhealthy: %w", name, err))
+		if hc, ok := n.module.(HealthChecker); ok {
+			probes = append(probes, healthProbe{name: name, checker: hc})
+		}
+	}
+	m.mu.Unlock()
+
+	var errs []error
+	for _, p := range probes {
+		if err := p.checker.HealthCheck(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("appmod: module %q is unhealthy: %w", p.name, err))
 		}
 	}
 

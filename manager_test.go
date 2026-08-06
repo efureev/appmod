@@ -3,6 +3,7 @@ package appmod
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -275,4 +276,119 @@ func assertBefore(t *testing.T, events []string, first, second string) {
 	if i >= j {
 		t.Errorf("expected %q (at %d) before %q (at %d): %v", first, i, second, j, events)
 	}
+}
+
+// TestManagerStartIsNotReentrant covers the guard on Start. Without it a second
+// Start failed on the already-initialized modules, treated that as a startup
+// failure and rolled back — stopping the modules the first Start had brought up.
+func TestManagerStartIsNotReentrant(t *testing.T) {
+	t.Run("SecondStartLeavesModulesRunning", func(t *testing.T) {
+		log := &eventLog{}
+		mgr := NewManager()
+		mod := newRecordingModule("a", log)
+		mustRegister(t, mgr, "a", mod)
+
+		if err := mgr.Start(t.Context()); err != nil {
+			t.Fatalf("Start() = %v, want nil", err)
+		}
+		if err := mgr.Start(t.Context()); !errors.Is(err, ErrAlreadyStarted) {
+			t.Errorf("second Start() = %v, want %v", err, ErrAlreadyStarted)
+		}
+
+		if got := mod.State(); got != StateRunning {
+			t.Errorf("module state after refused Start = %v, want %v", got, StateRunning)
+		}
+		if events := log.snapshot(); slices.Contains(events, "stop:a") {
+			t.Errorf("refused Start tore the module down: %v", events)
+		}
+	})
+
+	t.Run("ConcurrentStart", func(t *testing.T) {
+		log := &eventLog{}
+		mgr := NewManager()
+		mod := newRecordingModule("a", log)
+		mustRegister(t, mgr, "a", mod)
+
+		var (
+			wg   sync.WaitGroup
+			errs = make([]error, 2)
+		)
+		for i := range errs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = mgr.Start(context.Background())
+			}()
+		}
+		wg.Wait()
+
+		var okCount int
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				okCount++
+			case !errors.Is(err, ErrAlreadyStarted):
+				t.Errorf("Start() = %v, want nil or %v", err, ErrAlreadyStarted)
+			}
+		}
+		if okCount != 1 {
+			t.Errorf("%d concurrent Start() calls succeeded, want exactly 1", okCount)
+		}
+		if got := mod.State(); got != StateRunning {
+			t.Errorf("module state after concurrent Start = %v, want %v", got, StateRunning)
+		}
+	})
+
+	t.Run("RestartAfterStop", func(t *testing.T) {
+		log := &eventLog{}
+		mgr := NewManager()
+		mustRegister(t, mgr, "a", newRecordingModule("a", log))
+
+		if err := mgr.Start(t.Context()); err != nil {
+			t.Fatalf("Start() = %v, want nil", err)
+		}
+		if err := mgr.Stop(t.Context()); err != nil {
+			t.Fatalf("Stop() = %v, want nil", err)
+		}
+		if err := mgr.Start(t.Context()); err != nil {
+			t.Errorf("Start() after Stop = %v, want nil", err)
+		}
+
+		want := []string{"start:a", "stop:a", "start:a"}
+		if got := log.snapshot(); !slices.Equal(got, want) {
+			t.Errorf("event log = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestManagerHealthConcurrentRegister pins the fix for a data race: Health used
+// to copy the node map by reference and read it after releasing the mutex, which
+// races a concurrent Register. Run under -race.
+func TestManagerHealthConcurrentRegister(t *testing.T) {
+	log := &eventLog{}
+	mgr := NewManager()
+	mustRegister(t, mgr, "a", newRecordingModule("a", log))
+
+	if err := mgr.Start(t.Context()); err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 500 {
+			_ = mgr.Register(fmt.Sprintf("m%d", i), newRecordingModule("m", log))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 500 {
+			if err := mgr.Health(context.Background()); err != nil {
+				t.Errorf("Health() = %v, want nil", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

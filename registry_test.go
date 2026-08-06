@@ -3,6 +3,7 @@ package appmod
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -149,4 +150,56 @@ func TestManagerInjectsContext(t *testing.T) {
 	if consumed != "hello" {
 		t.Errorf("consumer obtained %q via Require, want %q", consumed, "hello")
 	}
+}
+
+// TestRegistryProvideNil guards the contract that a nil implementation is
+// refused where the mistake is made. Before this was enforced, Provide accepted
+// nil silently and the failure only surfaced as a panic inside Require.
+func TestRegistryProvideNil(t *testing.T) {
+	t.Run("NilInterfaceRejected", func(t *testing.T) {
+		reg := NewRegistry()
+
+		if err := Provide[greeter](reg, nil); !errors.Is(err, ErrNilImplementation) {
+			t.Errorf("Provide(nil) = %v, want %v", err, ErrNilImplementation)
+		}
+		if _, err := Require[greeter](reg); !errors.Is(err, ErrProviderNotFound) {
+			t.Errorf("Require() = %v, want %v", err, ErrProviderNotFound)
+		}
+	})
+
+	t.Run("NilPointerRejected", func(t *testing.T) {
+		reg := NewRegistry()
+
+		var impl *enGreeter
+		if err := Provide[*enGreeter](reg, impl); !errors.Is(err, ErrNilImplementation) {
+			t.Errorf("Provide((*enGreeter)(nil)) = %v, want %v", err, ErrNilImplementation)
+		}
+	})
+
+	t.Run("NonNilableKindStillAccepted", func(t *testing.T) {
+		reg := NewRegistry()
+
+		if err := Provide[int](reg, 0); err != nil {
+			t.Errorf("Provide[int](0) = %v, want nil", err)
+		}
+		if got, err := Require[int](reg); err != nil || got != 0 {
+			t.Errorf("Require[int]() = (%v, %v), want (0, nil)", got, err)
+		}
+	})
+
+	t.Run("RequireNeverPanics", func(t *testing.T) {
+		reg := NewRegistry()
+		// Bypass Provide to simulate a registry holding a nil value: Require must
+		// report an error rather than panic on the type assertion.
+		reg.services[reflect.TypeFor[greeter]()] = nil
+
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Require() panicked: %v", r)
+			}
+		}()
+		if _, err := Require[greeter](reg); !errors.Is(err, ErrProviderNotFound) {
+			t.Errorf("Require() = %v, want %v", err, ErrProviderNotFound)
+		}
+	})
 }

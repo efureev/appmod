@@ -25,8 +25,12 @@ type Stateful interface {
 
 // HookModule is the narrow view of a module passed to a [HookFunc]. It grants
 // access to the configuration, name and state but deliberately omits the
-// [Lifecycle] and [HookRegistry] capabilities to discourage re-entrant or
-// shared-state mutations from within a hook.
+// [Lifecycle] and [HookRegistry] capabilities, so a hook cannot re-enter
+// Init/Destroy or mutate the hook set while it is running.
+//
+// The value a hook receives is an opaque view, not the module itself: asserting
+// it back to [Lifecycle], [HookRegistry] or *[BaseAppModule] fails. The
+// narrowing is a boundary, not a hint.
 type HookModule interface {
 	Configurable
 	Named

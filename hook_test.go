@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -52,6 +53,33 @@ func TestHookPriority(t *testing.T) {
 	}
 
 	want := []string{"a", "b1", "b2", "c"}
+	if !slices.Equal(order, want) {
+		t.Errorf("hook order = %v, want %v", order, want)
+	}
+}
+
+// TestHookPriorityExtremes guards the ordering against integer overflow: a
+// comparator written as (a.Priority - b.Priority) wraps around for operands this
+// far apart and silently inverts the order.
+func TestHookPriorityExtremes(t *testing.T) {
+	mod := &BaseAppModule{}
+
+	var order []string
+	add := func(name string, prio int) {
+		mod.AddHook(PhaseBeforeStart, Hook{Name: name, Priority: prio, Run: func(_ context.Context, _ HookModule) error {
+			order = append(order, name)
+			return nil
+		}})
+	}
+	add("max", math.MaxInt)
+	add("min", math.MinInt)
+	add("zero", 0)
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+
+	want := []string{"min", "zero", "max"}
 	if !slices.Equal(order, want) {
 		t.Errorf("hook order = %v, want %v", order, want)
 	}
@@ -138,5 +166,51 @@ func TestModuleLogger(t *testing.T) {
 	}
 	if !strings.Contains(out, "module=logged") {
 		t.Errorf("log output missing module name: %q", out)
+	}
+}
+
+// TestHookModuleIsOpaque pins the narrowing of the hook view. The hook used to
+// receive *BaseAppModule itself, so one type assertion recovered the full API:
+// a hook could re-enter Init/Destroy or mutate the hook set while running.
+func TestHookModuleIsOpaque(t *testing.T) {
+	mod := &BaseAppModule{}
+	mod.SetConfig(NewConfig("m", "v1"))
+
+	var (
+		asLifecycle    bool
+		asHookRegistry bool
+		asConcrete     bool
+		name           string
+		state          State
+	)
+	mod.AfterStart(func(_ context.Context, m HookModule) error {
+		_, asLifecycle = m.(Lifecycle)
+		_, asHookRegistry = m.(HookRegistry)
+		_, asConcrete = m.(*BaseAppModule)
+		name, state = m.Name(), m.State()
+
+		return nil
+	})
+
+	if err := mod.Init(t.Context()); err != nil {
+		t.Fatalf("Init() = %v, want nil", err)
+	}
+
+	if asLifecycle {
+		t.Error("HookModule asserts to Lifecycle: a hook can re-enter Init/Destroy")
+	}
+	if asHookRegistry {
+		t.Error("HookModule asserts to HookRegistry: a hook can mutate the hook set while running")
+	}
+	if asConcrete {
+		t.Error("HookModule asserts to *BaseAppModule: the whole module escapes the view")
+	}
+
+	// The view must still expose everything HookModule promises.
+	if name != "m" {
+		t.Errorf("Name() = %q, want %q", name, "m")
+	}
+	if state != StateInitializing {
+		t.Errorf("State() = %v, want %v", state, StateInitializing)
 	}
 }

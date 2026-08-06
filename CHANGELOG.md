@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Events published through an interface were silently dropped**: events are
+  keyed by their Go type, but `reflect` reports the *static* type of the
+  parameter, so the moment a value reached `Publish` through an interface
+  variable — an `any`, an `error`, a domain interface, any wrapper layer — `T`
+  was inferred as that interface. `Publish` looked up the interface bucket,
+  delivered the event to nobody and returned `nil`: the event vanished without a
+  single sign that anything went wrong. Events are now delivered by their
+  **dynamic** type as well as by `T`. Subscribers registered for an interface
+  type keep working and no subscriber is ever invoked twice, since a subscriber
+  belongs to exactly one type key. Covered by
+  `TestEventBusPublishThroughInterface`.
+
+- **A nil event panicked inside the subscriber**: `Subscribe` wrapped handlers in
+  an unchecked `ev.(T)`, and asserting a nil interface panics regardless of `T`,
+  so `Publish`-ing a nil event to a `Subscribe[any]` handler blew up in the
+  subscriber (recovered and reported as an error, but still a spurious failure).
+  The wrapper now uses a checked assertion and passes the zero value of `T`.
+  Found while covering the fix above; same class of defect as the `Require[T]`
+  panic below.
+
+- **The `HookModule` view was escapable**: hooks were handed the
+  `*BaseAppModule` itself, so a single type assertion recovered `Lifecycle` or
+  `HookRegistry` and let a hook re-enter the lifecycle or mutate the hook set
+  while it was running — exactly what the narrow view exists to prevent. Hooks
+  now receive an opaque view value; asserting it to `Lifecycle`, `HookRegistry`
+  or `*BaseAppModule` fails. The documented boundary is now an actual boundary.
+  Covered by `TestHookModuleIsOpaque`.
+
+- **Data race in `Manager.Health`** (could crash the process): `Health` copied
+  the node *map* by reference under the mutex and then read it after releasing
+  the lock, racing a concurrent `Manager.Register`. Concurrent map read/write is
+  not a benign race in Go — it aborts the process with
+  `fatal error: concurrent map read and map write`, which `recover` cannot catch,
+  so a `/healthz` handler running alongside a module registration could take the
+  application down. `Health` now collects the `HealthChecker` probes it needs
+  under the mutex and runs them (user code, potentially blocking) without holding
+  it. Confirmed by the race detector; covered by
+  `TestManagerHealthConcurrentRegister`.
+
+- **A second `Manager.Start` tore down the running application**: `Start` had no
+  re-entry guard, so a stray or concurrent second call failed on the
+  already-initialized modules, treated that as a startup failure and rolled back
+  — stopping the modules the *first* `Start` had successfully brought up, leaving
+  every module `Destroyed` while the first caller had long since been told
+  everything was fine. `Start` is now non-re-entrant and returns the new
+  `ErrAlreadyStarted` without touching the running modules; it also refuses to
+  run while modules from a previous, context-aborted teardown are still up. After
+  `Stop` the manager can be started again. Covered by
+  `TestManagerStartIsNotReentrant`.
+
+- **Double teardown on a concurrent `Init`/`Destroy`**: `Init` transitioned the
+  module to `StateRunning` *before* running the `AfterStart` hooks, so a
+  concurrent `Destroy` passed its state guard and ran the teardown hooks while a
+  failing `AfterStart` was rolling the module back through the same hooks. The
+  hooks ran twice (double `Close`, double release), `Destroy` reported success,
+  and the two final `setState` calls raced. `Init` now publishes `StateRunning`
+  only once **both** start phases have succeeded, so a concurrent `Destroy` is
+  refused with `ErrNotInitialized`. The race detector cannot find this class of
+  bug — every field was correctly mutex-guarded; it was the invariant that was
+  broken. Covered by `TestAppModuleAfterStartWindow`.
+
+  **Behavior change:** an `AfterStart` hook now observes `StateInitializing`
+  rather than `StateRunning`. This makes the documented guarantee — `Init` either
+  fully succeeds (`StateRunning`) or fails (`StateFailed`) — actually hold; it
+  previously did not, since the module transiently reported `Running` before
+  ending up `Failed`.
+
+- **`Require[T]` panicked on a nil contract**: `Provide[T]` accepted a nil
+  implementation silently and `Require[T]` recovered it with an unchecked type
+  assertion, panicking with `interface conversion: interface is nil`. The usual
+  trigger is a provider whose constructor returned `(nil, err)` with the error
+  unchecked. `Provide` now rejects nil interfaces, pointers, maps, slices,
+  functions and channels with the new `ErrNilImplementation`, reporting the
+  mistake where it is made, and `Require` uses a checked assertion so it can no
+  longer panic under any circumstance. Covered by `TestRegistryProvideNil`.
+
+- **Hook ordering inverted at extreme priorities**: `orderHooks` compared hooks
+  with `a.Priority - b.Priority`, which overflows `int` for operands as far apart
+  as `math.MinInt` and `math.MaxInt` and silently reverses the order. It now uses
+  `cmp.Compare`. Covered by `TestHookPriorityExtremes`.
+
 - **Goroutine leak on shutdown timeout**: `Manager.Stop` now honors context
   cancellation between modules. When `Manager.Run` hits its `WithShutdownTimeout`
   and the shutdown package cancels the teardown context, `Stop` aborts before the
@@ -72,7 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shutdown (`Run`), an optional `HealthChecker` interface with `Health`, and the
   `NewManager` constructor with `WithLogger` / `WithShutdownTimeout` options.
 - Orchestration sentinel errors `ErrEmptyName`, `ErrNilModule`,
-  `ErrDuplicateModule`, `ErrUnknownDependency`, `ErrDependencyCycle`.
+  `ErrDuplicateModule`, `ErrUnknownDependency`, `ErrDependencyCycle`,
+  `ErrAlreadyStarted`.
+- Registry sentinel error `ErrNilImplementation`, returned by `Provide` for a nil
+  implementation.
 
 - `BaseAppModule` is now **safe for concurrent use**: lifecycle transitions, hook
   registration and configuration access are guarded by an internal mutex (#1).
@@ -90,15 +174,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Context-aware** lifecycle: `Init` / `Destroy` check the context between hooks
   and abort the remaining hooks when the context is canceled (#2).
 - **Automatic rollback** on a failed `Init`: the teardown hooks are run in
-  reverse registration order to release resources acquired by start hooks that
-  already ran; rollback errors are joined with the original cause via
-  `errors.Join` (#2).
+  reverse priority order (the reverse of the order they run in during `Destroy`)
+  and rollback errors are joined with the original cause via `errors.Join` (#2).
+  Rollback runs **every** teardown hook, not only those paired with a start hook
+  that actually completed — the package does not track how far the start phase
+  got. Teardown hooks must therefore be nil-safe and idempotent: a `BeforeStart`
+  hook failing first still triggers the full teardown.
 
 ### Changed
 
 - **Breaking:** `HookFunc` now receives the narrow read-only `HookModule` view
   (`Configurable` + `Named` + `Stateful`) instead of the full `AppModule`, so a
-  hook can no longer re-enter `Init` / `Destroy` or mutate the hook set (#3).
+  hook can no longer re-enter `Init` / `Destroy` or mutate the hook set (#3). The
+  value handed to a hook is an opaque view rather than the module itself, so the
+  narrowing cannot be undone with a type assertion (see the corresponding entry
+  under **Fixed**).
 - **Breaking:** failing hooks are now reported as `*HookError` (with the phase,
   index, hook name and module name) instead of a plain `fmt.Errorf` string (#4).
 - Internal hook storage is now `[]Hook` (named + prioritized); `AddHook` /

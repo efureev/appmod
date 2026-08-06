@@ -1,6 +1,7 @@
 package appmod
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -118,10 +119,17 @@ func (b *BaseAppModule) Initialized() bool {
 
 // Init initializes the app module.
 //
-// It runs all BeforeStart hooks, transitions the module to [StateRunning] and
-// then runs all AfterStart hooks. Init can only be started from [StateCreated],
-// [StateDestroyed] or [StateFailed]; otherwise it returns
-// [ErrAlreadyInitialized].
+// It runs all BeforeStart hooks, then all AfterStart hooks, and only once both
+// phases have succeeded does it transition the module to [StateRunning]. Init
+// can only be started from [StateCreated], [StateDestroyed] or [StateFailed];
+// otherwise it returns [ErrAlreadyInitialized].
+//
+// The module therefore reports [StateInitializing] for the whole duration of
+// Init, including while the AfterStart hooks run. This is deliberate: a module
+// that has not finished starting must not be observable as running, otherwise a
+// concurrent [BaseAppModule.Destroy] would pass its state guard and tear the
+// module down while Init is still working on it (running the teardown hooks a
+// second time, concurrently with the rollback below).
 //
 // Init is context-aware: the context is checked before every start hook and a
 // canceled context aborts the remaining hooks.
@@ -156,7 +164,6 @@ func (b *BaseAppModule) Init(ctx context.Context) error {
 	}
 
 	b.mu.Lock()
-	b.state = StateRunning
 	afterStart := slices.Clone(b.afterStartHooks)
 	b.mu.Unlock()
 
@@ -164,6 +171,10 @@ func (b *BaseAppModule) Init(ctx context.Context) error {
 		logger.ErrorContext(ctx, "module init failed", "module", b.Name(), "phase", PhaseAfterStart.String(), "error", err)
 		return b.failInit(ctx, err)
 	}
+
+	// Publish StateRunning only now: until both start phases have completed the
+	// module must not be observable as running (see the doc comment above).
+	b.setState(StateRunning)
 
 	logger.InfoContext(ctx, "module initialized", "module", b.Name(), "duration", time.Since(start))
 
@@ -184,6 +195,17 @@ func (b *BaseAppModule) failInit(ctx context.Context, cause error) error {
 // rollback compensates a failed Init by running the teardown hooks
 // (BeforeDestroy then AfterDestroy) in reverse order, so that resources
 // acquired by the start hooks that already ran are released.
+//
+// Rollback is unconditional: every teardown hook runs, no matter how far the
+// start phase got. The package pairs no start hook with a specific teardown
+// hook, so it cannot know which compensations are warranted — even a module
+// whose very first BeforeStart hook failed, and which therefore acquired
+// nothing, has its full teardown executed.
+//
+// That is a deliberate contract, not an oversight: skipping teardown would leak
+// whatever the start hooks that did run had acquired. The cost is pushed onto
+// the hooks instead — teardown hooks MUST be nil-safe and idempotent, because
+// they can be invoked against resources that were never acquired.
 //
 // Unlike the start phases, rollback does not abort on context cancellation: it
 // always attempts every teardown hook and joins all resulting errors so that no
@@ -306,15 +328,40 @@ func (b *BaseAppModule) runHook(ctx context.Context, fn HookFunc) (err error) {
 		}
 	}()
 
-	return fn(ctx, b)
+	return fn(ctx, hookView{mod: b})
 }
+
+// hookView is the narrow view of a module handed to a [HookFunc].
+//
+// It is a distinct type rather than the module itself, and that is the whole
+// point: passing *BaseAppModule would satisfy [HookModule] just as well, but a
+// single type assertion back to [Lifecycle] or [HookRegistry] would then let a
+// hook re-enter the lifecycle or mutate the hook set while it is running. The
+// narrowing has to be unforgeable to mean anything.
+type hookView struct{ mod *BaseAppModule }
+
+// Config returns the module configuration.
+func (v hookView) Config() AppModuleConfig { return v.mod.Config() }
+
+// SetConfig sets the module configuration.
+func (v hookView) SetConfig(config AppModuleConfig) { v.mod.SetConfig(config) }
+
+// Name returns the module name.
+func (v hookView) Name() string { return v.mod.Name() }
+
+// State returns the current lifecycle state.
+func (v hookView) State() State { return v.mod.State() }
 
 // orderHooks returns a copy of the hooks sorted by ascending priority. Hooks
 // with the same priority keep their registration order (the sort is stable).
+//
+// The comparison uses [cmp.Compare] rather than a subtraction: the difference of
+// two extreme priorities (for example math.MinInt and math.MaxInt) overflows int
+// and silently inverts the order.
 func orderHooks(hooks []Hook) []Hook {
 	ordered := slices.Clone(hooks)
 	slices.SortStableFunc(ordered, func(a, b Hook) int {
-		return a.Priority - b.Priority
+		return cmp.Compare(a.Priority, b.Priority)
 	})
 
 	return ordered
