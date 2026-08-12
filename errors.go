@@ -48,22 +48,6 @@ var (
 	ErrAlreadyStarted = errors.New("appmod: manager already started")
 )
 
-// EventBus errors returned by [EventBus], [Subscribe] and [Publish].
-var (
-	// ErrNilBus is returned when a nil [EventBus] is passed to [Subscribe] or
-	// [Publish].
-	ErrNilBus = errors.New("appmod: event bus must not be nil")
-	// ErrNilSubscriber is returned by [Subscribe] when the handler is nil.
-	ErrNilSubscriber = errors.New("appmod: event subscriber must not be nil")
-	// ErrBusClosed is returned by [Subscribe] and [Publish] after the bus has
-	// been closed.
-	ErrBusClosed = errors.New("appmod: event bus is closed")
-	// ErrNoAppContext is returned by [SubscribeModule] when the module has not
-	// been given an [AppContext] yet. A [Manager] injects it before starting its
-	// modules, so subscribe from a start hook rather than from a constructor.
-	ErrNoAppContext = errors.New("appmod: module has no app context")
-)
-
 // Registry errors returned by [Registry], [Provide] and [Require].
 var (
 	// ErrNilRegistry is returned when a nil [Registry] is passed to [Provide],

@@ -33,7 +33,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 - `New(opts ...Option)` constructor with functional options.
 - **Shutdown observation** (`AppContext.Done()`): a module reacts to the shutdown as it starts, without blocking and without waiting for its own `Destroy`.
 - **Module orchestrator** `Manager`: dependency-ordered (topological) start with concurrent start of independent modules, layered reverse-order stop that is likewise concurrent within a layer, dependency-cycle detection, `SIGINT`/`SIGTERM`-aware graceful shutdown and optional health checks.
-- **Lifecycle-scoped compensations** (`AddCleanup`, `SubscribeModule`): the release is registered next to the acquisition and runs on `Destroy` and on rollback.
+- **Lifecycle-scoped compensations** (`AddCleanup`): the release is registered next to the acquisition and runs on `Destroy` and on rollback.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ hooks (`BeforeStart` / `AfterStart` / `BeforeDestroy` / `AfterDestroy`).
 ## Install
 
 ```bash
-go get github.com/efureev/appmod/v3
+go get github.com/efureev/appmod/v4
 ```
 
 ## API Overview
@@ -220,7 +220,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/efureev/appmod/v3"
+	"github.com/efureev/appmod/v4"
 )
 
 func main() {
@@ -370,15 +370,13 @@ goroutine; modules not yet stopped are retained for a subsequent `Stop`.
 ### Communication between modules
 
 The dependency graph only fixes the *order* in which modules start; for
-run-time communication the `Manager` shares an `AppContext` (an `EventBus`, a
-`Registry` and the logger) and injects it into every module that implements
-`ContextAware`. `BaseAppModule` already implements it, so an embedding module
-reaches the shared services via `m.AppContext()`. Use `Manager.EventBus()` and
-`Manager.Registry()` to reach the same instances from outside.
+run-time communication the `Manager` shares an `AppContext` (a `Registry` and the
+logger) and injects it into every module that implements `ContextAware`.
+`BaseAppModule` already implements it, so an embedding module reaches the shared
+services via `m.AppContext()`. Use `Manager.Registry()` to reach the same
+instance from outside.
 
-There are two complementary mechanisms:
-
-**Registry — pull (request/response).** A module *provides* an implementation of
+**Registry.** A module *provides* an implementation of
 a contract interface; a dependent module *requires* it. Because the contract is
 keyed by its Go type, consumers depend on the interface, not on the concrete
 module. A `Require[T]` is guaranteed to find its provider as long as the consumer
@@ -406,52 +404,35 @@ for a nil registry and for a contract that was never provided. The two cases are
 not distinguishable through its return value; check the registry for nil
 yourself if it matters.
 
-**EventBus — push (fire-and-forget).** A module *subscribes* to a value type and
-any module *publishes* values of that type. Delivery is synchronous, type-safe,
-panic-safe and joins subscriber errors via `errors.Join`.
+Anything a module needs to release when it goes down is registered next to where
+it was acquired with `AddCleanup`; cleanups run in reverse registration order on
+`Destroy` and on a failed `Init`'s rollback.
 
-Events are keyed by their Go type. When the value reaches `Publish` through an
-interface variable (an `any`, an `error`, a domain interface), the event is
-delivered by its **dynamic** type as well as by the static one, so passing an
-event along through a wrapper does not silently drop it. Subscribers registered
-for an interface type keep working, and no subscriber is ever called twice.
+### Notifications
 
-From inside a module, prefer `SubscribeModule`: it ties the subscription to the
-module's lifecycle and removes it on `Destroy`. Plain `Subscribe` hands back an
-`Unsubscribe` you must store and call yourself — forget it and a module that is
-stopped and started again is subscribed twice, so every event is delivered twice,
-growing by one delivery per restart. It is the `EventBus` counterpart of
-`Revoke`.
+This package ships no event bus, and that is deliberate. Answering a request and
+broadcasting a fact are different mechanisms with different failure modes — one
+returns an error to the caller, the other queues and may drop — and putting both
+behind one interface makes what a call does depend on which implementation was
+wired in.
+
+A bus is one more capability a module publishes through the `Registry`:
 
 ```go
-// inside a start hook of a module embedding appmod.BaseAppModule:
-err := appmod.SubscribeModule(&m.BaseAppModule, func(ctx context.Context, e UserCreated) error {
-    // invalidate, react, ...
-    return nil
-})
+// wiring, before Start:
+bus := hub.New()
+_ = appmod.Provide[*hub.Hub](mgr.Registry(), bus)
+
+// inside a module's start hook:
+bus, err := appmod.Require[*hub.Hub](m.AppContext().Registry)
 ```
 
-For anything else that must be released when the module goes down, register it
-next to where it was acquired with `AddCleanup`; cleanups run in reverse
-registration order on `Destroy` and on a failed `Init`'s rollback.
-
-```go
-type UserCreated struct{ ID string }
-
-// subscriber (e.g. cache, during its start):
-unsub, _ := appmod.Subscribe(m.AppContext().Bus, func(_ context.Context, e UserCreated) error {
-    // invalidate, react, ...
-    return nil
-})
-defer unsub() // or unsubscribe in BeforeDestroy
-
-// publisher (e.g. api, later):
-_ = appmod.Publish(ctx, m.AppContext().Bus, UserCreated{ID: "user:1"})
-```
-
-Rule of thumb: use the **Registry** when one module owns data and a caller needs
-an answer (`api → cache → db`); use the **EventBus** to broadcast a fact to any
-number of interested listeners without expecting a reply.
+[`msghub`](https://github.com/efureev/msghub) is the bus this project
+maintains — typed topics, queued delivery, explicit backpressure. The
+[`adapters/hubmod`](adapters/hubmod) module wires the two together: it owns the
+hub as a module and ties subscriptions to a module's lifecycle, so a module that
+restarts is not subscribed twice. It is a separate Go module, so this one stays
+free of the dependency.
 
 ## Examples
 
@@ -462,7 +443,7 @@ feature of the package:
 | --- | --- |
 | [`basic`](examples/basic)     | Single-module lifecycle: configuration, the four hooks and the `Created → Running → Destroyed` state machine. |
 | [`hooks`](examples/hooks)     | `New(...)` options, `slog` logging, named/prioritized hooks (`AddHook`/`RemoveHook`), the typed `HookError` and automatic rollback. |
-| [`manager`](examples/manager) | `Manager` orchestration of a dependency graph, plus inter-module communication: `api → cache → db` data access via `Provide`/`Require` and a `UserCreated` event via the `EventBus`. |
+| [`manager`](examples/manager) | `Manager` orchestration of a dependency graph, plus inter-module communication: `api → cache → db` data access via `Provide`/`Require`, and shutdown observation in a background worker. |
 
 ```bash
 go run ./examples/basic
@@ -485,9 +466,16 @@ The package is split into small, focused files:
 | `hook.go`    | The `Phase` and `Hook` types and the typed `HookError`.               |
 | `options.go` | Functional options and the `New` constructor.                         |
 | `manager.go` | The `Manager` orchestrator: dependency-ordered start/stop, graceful shutdown, health checks. |
-| `eventbus.go` | The type-safe `EventBus` for fire-and-forget notifications (`Subscribe`/`Publish`). |
 | `registry.go` | The type-safe `Registry` for contract-based access between modules (`Provide`/`Require`/`Revoke`). |
-| `appcontext.go` | The shared `AppContext` (`EventBus` + `Registry` + logger + the shutdown broadcast) and the `ContextAware` capability. |
+| `appcontext.go` | The shared `AppContext` (`Registry` + logger + the shutdown broadcast) and the `ContextAware` capability. |
+
+Alongside the package, [`adapters/`](adapters) holds **separate Go modules** that bridge appmod
+to other libraries. Each has its own `go.mod` and its own tags, so this module's dependency set
+is unchanged and importing appmod never pulls theirs in.
+
+| Module | Bridges to |
+|---|---|
+| [`adapters/hubmod`](adapters/hubmod) | [`msghub`](https://github.com/efureev/msghub) — a hub as a lifecycle-managed module, plus lifecycle-scoped subscriptions. |
 
 ## Development
 

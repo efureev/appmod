@@ -60,3 +60,37 @@ jobs:
             ${{ runner.os }}-go-
       - name: Test
         run: go test -v -race -coverprofile=coverage.out ./...
+
+  adapters:
+    name: Adapters
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        adapter: [ hubmod ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'adapters/${{ matrix.adapter }}/go.mod'
+
+      # The adapter pins appmod by version like any consumer would, but appmod
+      # v4.0.0 is not tagged yet, so the sources in this very commit are wired
+      # in instead. That is also what we want permanently: an adapter must be
+      # tested against the appmod it ships beside, not against a past release.
+      # A replace in a module's own go.mod is ignored when that module is a
+      # dependency, so this never reaches anyone importing the adapter.
+      - name: Check the local replace is in place
+        working-directory: adapters/${{ matrix.adapter }}
+        run: grep -q 'replace github.com/efureev/appmod/v4 => ../..' go.mod
+
+      - name: Go build
+        working-directory: adapters/${{ matrix.adapter }}
+        run: go build ./...
+      - name: Go vet
+        working-directory: adapters/${{ matrix.adapter }}
+        run: go vet ./...
+      - name: Test
+        working-directory: adapters/${{ matrix.adapter }}
+        run: go test -v -race ./...

@@ -48,13 +48,15 @@
 //	options.go — the functional options and the New constructor.
 //	manager.go — the Manager orchestrator: dependency-ordered start/stop of
 //	             multiple modules, graceful shutdown and health checks.
-//	eventbus.go — the type-safe EventBus for fire-and-forget notifications
-//	             (Subscribe / SubscribeModule / Publish).
-//	registry.go — the type-safe Registry for contract-based request/response
-//	             access between modules (Provide / Require / Revoke).
-//	appcontext.go — the shared AppContext (EventBus + Registry + Logger + the
-//	             shutdown broadcast) and the ContextAware capability used by the
-//	             Manager to inject it.
+//	registry.go — the type-safe Registry for contract-based access between
+//	             modules (Provide / Require / Revoke).
+//	appcontext.go — the shared AppContext (Registry + Logger + the shutdown
+//	             broadcast) and the ContextAware capability used by the Manager
+//	             to inject it.
+//
+// The adapters/ directory holds separate Go modules that bridge appmod to other
+// libraries. They are not part of this module, so importing appmod never pulls
+// their dependencies in.
 //
 // For applications composed of several inter-dependent modules, [Manager]
 // orchestrates them: modules are registered with their dependencies and started
@@ -62,12 +64,21 @@
 // modules of a dependency layer concurrently, so start-up and shutdown each cost
 // the slowest module per layer rather than the sum over all of them.
 //
-// Modules communicate at run time through two complementary mechanisms shared
-// via the [AppContext] that the Manager injects into every [ContextAware]
-// module: the [EventBus] for fire-and-forget notifications (push) and the
-// [Registry] for contract-based request/response access between modules (pull).
-// Both have a lifecycle-scoped form so a restarted module does not accumulate
-// stale registrations: [SubscribeModule] for the bus, [Revoke] for the registry.
+// Modules reach one another at run time through the [Registry] shared via the
+// [AppContext] that the Manager injects into every [ContextAware] module: a
+// provider publishes a contract with [Provide], a consumer takes it with
+// [Require], and [Revoke] releases it so a restarted module does not leave a
+// stale implementation behind.
+//
+// The Registry is the single extension point, and that includes messaging: this
+// package deliberately ships no event bus. Publishing notifications and
+// answering requests are different mechanisms with different failure modes —
+// one queues and may drop, the other returns an error — and hiding that
+// difference behind one interface makes the behavior of a call depend on which
+// implementation was wired in. An application that wants a bus provides one
+// through the Registry like any other contract; github.com/efureev/msghub
+// is the one this project maintains, and adapters/hubmod ties its lifecycle to
+// a module's.
 //
 // The AppContext also carries the shutdown broadcast: [AppContext.Done] closes
 // as soon as the application starts going down, so a module with a background

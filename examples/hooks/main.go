@@ -22,7 +22,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/efureev/appmod/v3"
+	"github.com/efureev/appmod/v4"
 )
 
 func main() {

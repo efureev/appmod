@@ -1,30 +1,29 @@
 // Command manager demonstrates orchestrating a graph of modules with
-// appmod.Manager and the two ways modules communicate at run time:
-//
-//   - pull (request/response) via the shared appmod.Registry: a module exposes
-//     a contract with appmod.Provide and a dependent module obtains it with
-//     appmod.Require. Here db provides DB, cache requires DB (and provides
-//     Cache) and api requires both Cache and DB.
-//   - push (fire-and-forget) via the shared appmod.EventBus: api publishes a
-//     UserCreated event and cache, which subscribed to it during its start,
-//     reacts by invalidating its entry.
+// appmod.Manager and how modules reach one another at run time: a module
+// exposes a contract with appmod.Provide and a dependent module obtains it with
+// appmod.Require, both through the shared appmod.Registry. Here db provides DB,
+// cache requires DB (and provides Cache) and api requires both Cache and DB.
 //
 // The worker module additionally shows shutdown observation: it watches
 // m.AppContext().Done() and stops taking new work the moment the shutdown
 // starts, rather than waiting for its own Destroy — which only runs after every
 // module depending on it has already stopped.
 //
-// The Manager injects a single shared appmod.AppContext (EventBus + Registry +
-// Logger) into every module that embeds appmod.BaseAppModule, so a module can
-// reach them through m.AppContext().
+// The Manager injects a single shared appmod.AppContext (Registry + Logger)
+// into every module that embeds appmod.BaseAppModule, so a module can reach
+// them through m.AppContext().
+//
+// Fire-and-forget notifications between modules are not part of this package;
+// an event bus is one more thing a module publishes through the Registry. See
+// adapters/hubmod for a worked example.
 //
 // The dependency graph used below:
 //
 //	config        (no deps)
 //	  ├── db      (depends on config)        -> Provide[DB]
 //	  ├── worker  (depends on config)        -> watches AppContext().Done()
-//	  └── cache   (depends on config, db)    -> Require[DB], Provide[Cache], Subscribe[UserCreated]
-//	        api   (depends on db and cache)  -> Require[Cache]+[DB], Publish[UserCreated]
+//	  └── cache   (depends on config, db)    -> Require[DB], Provide[Cache]
+//	        api   (depends on db and cache)  -> Require[Cache]+[DB]
 //
 // Run it with:
 //
@@ -39,7 +38,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/efureev/appmod/v3"
+	"github.com/efureev/appmod/v4"
 )
 
 // --- Contracts shared between modules ---------------------------------------
@@ -55,9 +54,6 @@ type DB interface {
 type Cache interface {
 	Get(ctx context.Context, key string) (string, bool)
 }
-
-// UserCreated is a fire-and-forget event published on the EventBus.
-type UserCreated struct{ ID string }
 
 // --- db module: provides DB --------------------------------------------------
 
@@ -119,20 +115,6 @@ func newCache() *cacheModule {
 		if v, err := db.Query(ctx, "user:1"); err == nil {
 			m.set("user:1", v)
 			fmt.Printf("  cache: warmed user:1 = %q from db\n", v)
-		}
-
-		// push: react to UserCreated events published anywhere in the app.
-		// SubscribeModule ties the subscription to this module's lifecycle, so it
-		// is removed on Destroy; plain Subscribe would leave the handler on the
-		// bus and a restarted module would receive every event twice.
-		if err := appmod.SubscribeModule(&m.BaseAppModule, func(_ context.Context, e UserCreated) error {
-			fmt.Printf("  cache: UserCreated(%s) received -> invalidating entry\n", e.ID)
-			m.mu.Lock()
-			delete(m.store, e.ID)
-			m.mu.Unlock()
-			return nil
-		}); err != nil {
-			return err
 		}
 
 		fmt.Println("  cache: providing Cache contract")
@@ -241,9 +223,7 @@ func newAPI() *apiModule {
 			fmt.Println("  api: read user:2 -> not found (cache miss + db miss)")
 		}
 
-		// push: notify the rest of the app; the cache reacts to this.
-		fmt.Println("  api: publishing UserCreated(user:1)")
-		return appmod.Publish(ctx, ac.Bus, UserCreated{ID: "user:1"})
+		return nil
 	})
 
 	return m

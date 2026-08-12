@@ -5,6 +5,73 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v4.0.0]
+
+The module path becomes `github.com/efureev/appmod/v4`. Update imports:
+
+```go
+import "github.com/efureev/appmod/v4"
+```
+
+### Removed — breaking
+
+- **`EventBus` is gone**, along with `NewEventBus`, `Subscribe`, `SubscribeModule`,
+  `Publish`, `Unsubscribe`, `AppContext.Bus`, `Manager.EventBus()` and the errors
+  `ErrNilBus`, `ErrNilSubscriber`, `ErrBusClosed` and `ErrNoAppContext`.
+
+  This package orchestrates lifecycles; shipping a second, subtly different
+  publish/subscribe implementation alongside the one this project already
+  maintains meant a consumer of both got two `Publish` functions with different
+  semantics and had to choose. Answering a request and broadcasting a fact are
+  different mechanisms with different failure modes — one returns an error to
+  the caller, the other queues and may drop — so they are not unified behind an
+  interface either: that would make what a call does depend on which
+  implementation was wired in.
+
+  **Replacement.** A bus is a capability like any other, published through the
+  `Registry`:
+
+  ```go
+  bus := hub.New()
+  _ = appmod.Provide[*hub.Hub](mgr.Registry(), bus)
+
+  // in a module's start hook:
+  bus, err := appmod.Require[*hub.Hub](m.AppContext().Registry)
+  ```
+
+  [`msghub`](https://github.com/efureev/msghub) v3 covers everything the
+  removed bus did — typed events, synchronous delivery returning the handler's
+  error, panic recovery — and adds queued delivery, per-subscriber ordering,
+  explicit backpressure and failure reporting.
+
+  `SubscribeModule` moves to the new `adapters/hubmod` module, which keeps its
+  behavior: a subscription tied to the module's lifecycle, removed on `Destroy`
+  and on a failed `Init`'s rollback.
+
+  One thing does not carry over: the removed bus keyed an event by its dynamic
+  type as well as its static one, to survive a value arriving through an `any`
+  or an interface. msghub does not need the workaround — the payload type
+  comes from an explicitly constructed `Topic[T]`, not from inferring it at the
+  call site — so the case cannot arise.
+
+### Added
+
+- **`adapters/` directory** for separate Go modules bridging appmod to other
+  libraries. Each has its own `go.mod`, so this module's dependency set is
+  unchanged and importing appmod never pulls theirs in.
+
+- **`adapters/hubmod`** (`github.com/efureev/appmod/adapters/hubmod`) ties a
+  `msghub` hub to the module lifecycle: `NewModule` owns the hub and drains
+  then closes it on teardown, `SubscribeModule` scopes a subscription to a
+  module, and `Provide`/`Require` publish the hub through the `Registry`.
+
+### Changed
+
+- `AppContext` documents the `Registry` as the single extension point through
+  which modules share anything, including a bus.
+- The `manager` example no longer demonstrates push notifications; the scenario
+  moved to `adapters/hubmod`, where it can be shown with a real bus.
+
 ## [v3.0.0] 2026-08-06
 
 The module path becomes `github.com/efureev/appmod/v3`. Update imports:

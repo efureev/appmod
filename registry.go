@@ -17,8 +17,9 @@ import (
 // A Registry is safe for concurrent use by multiple goroutines.
 //
 // Use the registry for request/response data access between modules (for
-// example, the api module calling the cache module, which calls the db module).
-// For fire-and-forget notifications use the [EventBus] instead.
+// example, the api module calling the cache module, which calls the db module),
+// and for handing modules any other shared capability — including an event bus,
+// which this package does not provide itself.
 //
 // Ordering note: a module that calls [Require] for a contract must also declare
 // a [Manager] dependency on the providing module, so that the provider's
