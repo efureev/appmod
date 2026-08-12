@@ -88,7 +88,7 @@ func (m *dbModule) Query(_ context.Context, key string) (string, error) {
 	return "", fmt.Errorf("db: key %q not found", key)
 }
 
-// --- cache module: requires DB, provides Cache, subscribes to UserCreated ----
+// --- cache module: requires DB, provides Cache --------------------------------
 
 type cacheModule struct {
 	appmod.BaseAppModule
@@ -104,7 +104,7 @@ func newCache() *cacheModule {
 	m.AfterStart(func(ctx context.Context, _ appmod.HookModule) error {
 		ac := m.AppContext()
 
-		// pull: obtain the DB contract provided by the db module.
+		// Obtain the DB contract provided by the db module.
 		db, err := appmod.Require[DB](ac.Registry)
 		if err != nil {
 			return err
@@ -194,7 +194,7 @@ func newWorker() *workerModule {
 	return m
 }
 
-// --- api module: requires Cache and DB, publishes UserCreated ----------------
+// --- api module: requires Cache and DB ----------------------------------------
 
 type apiModule struct {
 	appmod.BaseAppModule
@@ -207,7 +207,7 @@ func newAPI() *apiModule {
 	m.AfterStart(func(ctx context.Context, _ appmod.HookModule) error {
 		ac := m.AppContext()
 
-		// pull: obtain both contracts the api needs.
+		// Obtain both contracts the api needs.
 		cache, err := appmod.Require[Cache](ac.Registry)
 		if err != nil {
 			return err

@@ -419,12 +419,14 @@ wired in.
 A bus is one more capability a module publishes through the `Registry`:
 
 ```go
+import "github.com/efureev/msghub/v3"
+
 // wiring, before Start:
-bus := hub.New()
-_ = appmod.Provide[*hub.Hub](mgr.Registry(), bus)
+bus := msghub.New()
+_ = appmod.Provide[*msghub.Hub](mgr.Registry(), bus)
 
 // inside a module's start hook:
-bus, err := appmod.Require[*hub.Hub](m.AppContext().Registry)
+bus, err := appmod.Require[*msghub.Hub](m.AppContext().Registry)
 ```
 
 [`msghub`](https://github.com/efureev/msghub) is the bus this project

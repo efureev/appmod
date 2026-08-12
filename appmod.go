@@ -36,23 +36,25 @@
 //
 // The package is organized into focused files:
 //
-//	module.go  — the AppModule contract and the narrow Configurable / Named /
-//	             Stateful / Lifecycle / HookRegistry interfaces, HookFunc and the
-//	             read-only HookModule view.
-//	config.go  — the AppModuleConfig interface, the Config value type and its
-//	             constructors (NewConfig, DefaultConfig).
-//	hook.go    — the Phase and Hook types and the typed HookError.
-//	state.go   — the lifecycle State enum and its String method.
-//	errors.go  — the sentinel lifecycle errors.
-//	base.go    — the embeddable BaseAppModule implementation.
-//	options.go — the functional options and the New constructor.
-//	manager.go — the Manager orchestrator: dependency-ordered start/stop of
-//	             multiple modules, graceful shutdown and health checks.
-//	registry.go — the type-safe Registry for contract-based access between
-//	             modules (Provide / Require / Revoke).
+//	appmod.go     — the package documentation and the compile-time contract
+//	                checks.
+//	module.go     — the AppModule contract and the narrow Configurable / Named /
+//	                Stateful / Lifecycle / HookRegistry interfaces, HookFunc and
+//	                the read-only HookModule view.
+//	config.go     — the AppModuleConfig interface, the Config value type and its
+//	                constructors (NewConfig, DefaultConfig).
+//	hook.go       — the Phase and Hook types and the typed HookError.
+//	state.go      — the lifecycle State enum and its String method.
+//	errors.go     — the sentinel lifecycle errors.
+//	base.go       — the embeddable BaseAppModule implementation.
+//	options.go    — the functional options and the New constructor.
+//	manager.go    — the Manager orchestrator: dependency-ordered start/stop of
+//	                multiple modules, graceful shutdown and health checks.
+//	registry.go   — the type-safe Registry for contract-based access between
+//	                modules (Provide / Require / Revoke).
 //	appcontext.go — the shared AppContext (Registry + Logger + the shutdown
-//	             broadcast) and the ContextAware capability used by the Manager
-//	             to inject it.
+//	                broadcast) and the ContextAware capability used by the
+//	                Manager to inject it.
 //
 // The adapters/ directory holds separate Go modules that bridge appmod to other
 // libraries. They are not part of this module, so importing appmod never pulls

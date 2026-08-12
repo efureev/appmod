@@ -429,12 +429,14 @@ nil-реестра, и для контракта, который никогда 
 Шина — это ещё одна возможность, которую модуль публикует через `Registry`:
 
 ```go
+import "github.com/efureev/msghub/v3"
+
 // в проводке, до Start:
-bus := hub.New()
-_ = appmod.Provide[*hub.Hub](mgr.Registry(), bus)
+bus := msghub.New()
+_ = appmod.Provide[*msghub.Hub](mgr.Registry(), bus)
 
 // внутри стартового хука модуля:
-bus, err := appmod.Require[*hub.Hub](m.AppContext().Registry)
+bus, err := appmod.Require[*msghub.Hub](m.AppContext().Registry)
 ```
 
 [`msghub`](https://github.com/efureev/msghub) — шина, которую

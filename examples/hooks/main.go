@@ -26,7 +26,10 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level:       slog.LevelDebug,
+		ReplaceAttr: stableAttrs,
+	}))
 
 	// New builds a module from functional options: configuration, logger and an
 	// initial set of named, prioritized hooks.
@@ -120,4 +123,25 @@ func failingHookError() {
 		fmt.Printf("typed error -> phase=%s index=%d module=%q\n", hookErr.Phase, hookErr.Index, hookErr.Module)
 	}
 	fmt.Println("errors.Is(err, errBoom):", errors.Is(err, errBoom))
+}
+
+// stableAttrs keeps the logged output identical on every run, so this example
+// reads as documentation rather than as a sample of one particular execution.
+//
+// Two attributes vary by nature. The timestamp is dropped outright: it carries
+// nothing a reader of an example needs. The duration appmod reports for each
+// lifecycle phase is replaced rather than dropped, because *that* the phase is
+// timed is worth seeing — only the measurement itself cannot be reproduced.
+//
+// A real program logs both as they come; this substitution belongs to the
+// example, not to the package.
+func stableAttrs(_ []string, a slog.Attr) slog.Attr {
+	switch a.Key {
+	case slog.TimeKey:
+		return slog.Attr{}
+	case "duration":
+		return slog.String("duration", "<elapsed>")
+	default:
+		return a
+	}
 }

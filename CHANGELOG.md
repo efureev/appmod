@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [v4.0.0]
 
+Thsi release: removing `EventBus` is breaking.
 The module path becomes `github.com/efureev/appmod/v4`. Update imports:
 
 ```go
@@ -32,11 +33,11 @@ import "github.com/efureev/appmod/v4"
   `Registry`:
 
   ```go
-  bus := hub.New()
-  _ = appmod.Provide[*hub.Hub](mgr.Registry(), bus)
+  bus := msghub.New()
+  _ = appmod.Provide[*msghub.Hub](mgr.Registry(), bus)
 
   // in a module's start hook:
-  bus, err := appmod.Require[*hub.Hub](m.AppContext().Registry)
+  bus, err := appmod.Require[*msghub.Hub](m.AppContext().Registry)
   ```
 
   [`msghub`](https://github.com/efureev/msghub) v3 covers everything the
