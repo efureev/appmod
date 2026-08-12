@@ -70,7 +70,14 @@ module, so a module stopped and started again is subscribed twice and every even
 twice — growing by one delivery per restart, while the stale handler keeps a live reference to
 the destroyed module.
 
-A runnable version of the whole wiring is in [`example_test.go`](example_test.go).
+The same wiring in a handful of lines is in [`example_test.go`](example_test.go). For an
+application that runs — orders arriving, both delivery modes side by side, a module restarted
+mid-run without being subscribed twice — see [`examples/orders`](examples/orders):
+
+```bash
+cd adapters/hubmod
+go run ./examples/orders
+```
 
 ## Options
 

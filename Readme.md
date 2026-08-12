@@ -453,6 +453,18 @@ go run ./examples/hooks
 go run ./examples/manager
 ```
 
+The adapters carry their own, because they need a dependency this module does
+not have. They live in a separate Go module, so they run from the adapter
+directory rather than from the repository root:
+
+| Example | Demonstrates |
+| --- | --- |
+| [`hubmod/orders`](adapters/hubmod/examples/orders) | An application on an event bus: `hubmod.NewModule` owning the hub, `Require` taking it from the `Registry` in a start hook, `SubscribeModule` scoping subscriptions to a module, synchronous and queued delivery side by side on one topic, a module restarted mid-run without being subscribed twice, and a teardown that closes the hub after every publisher has stopped. |
+
+```bash
+cd adapters/hubmod && go run ./examples/orders
+```
+
 ## Package layout
 
 The package is split into small, focused files:

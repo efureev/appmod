@@ -17,3 +17,14 @@ go run ./examples/basic
 go run ./examples/hooks
 go run ./examples/manager
 ```
+
+## Adapters
+
+An example that needs a dependency this module does not have lives with its
+adapter instead, in that adapter's own Go module — see
+[`adapters/hubmod/examples`](../adapters/hubmod/examples) for an application
+built on an event bus. Those run from the adapter directory:
+
+```sh
+cd adapters/hubmod && go run ./examples/orders
+```

@@ -66,6 +66,12 @@ import "github.com/efureev/appmod/v4"
   then closes it on teardown, `SubscribeModule` scopes a subscription to a
   module, and `Provide`/`Require` publish the hub through the `Registry`.
 
+- **`adapters/hubmod/examples/orders`**, a runnable application on top of the
+  adapter: four modules around one bus, msghub's synchronous and queued delivery
+  side by side on the same topic, a module restarted mid-run without being
+  subscribed twice, and a teardown that closes the hub after every publisher has
+  stopped. Run it with `go run ./examples/orders` from `adapters/hubmod`.
+
 ### Changed
 
 - `AppContext` documents the `Registry` as the single extension point through
