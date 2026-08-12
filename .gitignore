@@ -14,3 +14,7 @@ coverage.txt
 coverage.html
 .idea
 .DS_Store
+
+# Go workspace: local multi-module development, never committed
+go.work
+go.work.sum

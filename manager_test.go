@@ -985,7 +985,7 @@ func TestAppContextShutdownObservation(t *testing.T) {
 	t.Run("HandBuiltContextNeverShutsDown", func(t *testing.T) {
 		// AppContext is a public struct; one assembled by hand has no shutdown to
 		// observe and must not panic.
-		ac := &AppContext{Bus: NewEventBus(), Registry: NewRegistry()}
+		ac := &AppContext{Registry: NewRegistry()}
 
 		if ac.Done() != nil {
 			t.Error("Done() = non-nil, want a nil channel that blocks forever")

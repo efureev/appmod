@@ -84,7 +84,7 @@ type Manager struct {
 	// ran guards the single-use shutdown sequence; see [ErrAlreadyRun].
 	ran bool
 
-	// appCtx is the shared context (EventBus + Registry + Logger) injected into
+	// appCtx is the shared context (Registry + Logger) injected into
 	// every ContextAware module before Start.
 	appCtx *AppContext
 }
@@ -144,7 +144,6 @@ func NewManager(opts ...ManagerOption) *Manager {
 	)
 
 	m.appCtx = &AppContext{
-		Bus:      NewEventBus(),
 		Registry: NewRegistry(),
 		Logger:   m.logger,
 		shutdown: m.sh.Context(),
@@ -152,9 +151,6 @@ func NewManager(opts ...ManagerOption) *Manager {
 
 	return m
 }
-
-// EventBus returns the shared [EventBus] injected into the manager's modules.
-func (m *Manager) EventBus() *EventBus { return m.appCtx.Bus }
 
 // Registry returns the shared [Registry] injected into the manager's modules.
 func (m *Manager) Registry() *Registry { return m.appCtx.Registry }
@@ -256,8 +252,8 @@ func (m *Manager) setState(s managerState) {
 }
 
 // injectContext hands the shared [AppContext] to every registered module that
-// implements [ContextAware], so modules can reach the shared [EventBus] and
-// [Registry] before they are started.
+// implements [ContextAware], so modules can reach the shared [Registry] and
+// logger before they are started.
 func (m *Manager) injectContext() {
 	m.mu.Lock()
 	modules := make([]AppModule, 0, len(m.nodes))

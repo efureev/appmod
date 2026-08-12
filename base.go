@@ -47,8 +47,9 @@ type BaseAppModule struct {
 //
 // It exists because the natural place to release something is next to where it
 // was acquired, not in a separate teardown hook wired up by hand. The canonical
-// case is an [EventBus] subscription, whose Unsubscribe would otherwise have
-// nowhere to live — see [SubscribeModule], which is built on this.
+// case is a subscription to an external event bus, whose unsubscribe function
+// would otherwise have nowhere to live: left unregistered, the handler outlives
+// the module, so a module stopped and started again is subscribed twice.
 //
 // A cleanup that panics is recovered and reported as an error, like a hook. A
 // nil fn is ignored.
@@ -161,7 +162,7 @@ func (b *BaseAppModule) SetAppContext(c *AppContext) {
 
 // AppContext returns the shared [AppContext] previously injected with
 // [BaseAppModule.SetAppContext], or nil if none was set. Use it to reach the
-// shared [EventBus] (Bus) and [Registry] (Registry).
+// shared [Registry] (Registry) and the application logger (Logger).
 func (b *BaseAppModule) AppContext() *AppContext {
 	b.mu.Lock()
 	defer b.mu.Unlock()

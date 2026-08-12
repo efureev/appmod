@@ -609,8 +609,9 @@ func TestZeroValueModuleHasDefaultConfig(t *testing.T) {
 	}
 }
 
-// TestAddCleanup covers the cleanup registry backing SubscribeModule: LIFO
-// order, execution on both teardown paths, and single execution.
+// TestAddCleanup covers the cleanup registry a module uses to release what it
+// acquired while starting — an event-bus subscription, a watch, a connection:
+// LIFO order, execution on both teardown paths, and single execution.
 func TestAddCleanup(t *testing.T) {
 	t.Run("RunsLIFOOnDestroy", func(t *testing.T) {
 		var order []string

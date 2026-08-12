@@ -1,4 +1,4 @@
-module github.com/efureev/appmod/v3
+module github.com/efureev/appmod/v4
 
 go 1.24
 

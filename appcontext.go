@@ -6,16 +6,17 @@ import (
 )
 
 // AppContext bundles the shared services a [Manager] hands to its modules: the
-// [EventBus] for fire-and-forget notifications (push), the [Registry] for
-// contract-based request/response access between modules (pull) and the
-// application logger.
+// [Registry] for contract-based access between modules and the application
+// logger.
 //
 // A single AppContext is created per [Manager] and injected into every
 // registered module that implements [ContextAware] before the modules are
 // started.
+//
+// Anything else modules need to share travels through the Registry, including
+// an event bus: publish it once with [Provide] and take it with [Require]. The
+// package deliberately has no bus of its own — see the package documentation.
 type AppContext struct {
-	// Bus is the shared event bus for publish/subscribe notifications.
-	Bus *EventBus
 	// Registry is the shared service registry for Provide/Require contracts.
 	Registry *Registry
 	// Logger is the application logger (never nil).
